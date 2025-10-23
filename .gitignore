@@ -1,0 +1,6 @@
+/data_v1
+.env
+.DS_Store
+__pycache__/
+library_cache.json
+/data_v2

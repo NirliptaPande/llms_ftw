@@ -286,7 +286,6 @@ HYP: [DSL operations to achieve this]
 After all examples:
 ```
 <final_pattern>
-SIZE: (h,w) → (h',w')
 OPS:
 x1 = func1(I)
 x2 = func2(x1, ...)

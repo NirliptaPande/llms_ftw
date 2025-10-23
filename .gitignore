@@ -4,3 +4,4 @@
 __pycache__/
 library_cache.json
 /data_v2
+/logs

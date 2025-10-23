@@ -233,7 +233,11 @@ def solve_task(
             phase1_prompt,
             system_prompt="You are an expert at analyzing ARC puzzles and discovering transformation patterns."
         )
-        
+        log_path = Path(__file__).resolve().parent.parent / 'logs'
+        log_path.mkdir(parents=True, exist_ok=True)
+        with open(log_path / 'output.json', 'w') as f:
+            json.dump(phase1_output, f, indent=2)
+
         if verbose:
             print(f" Phase 1 complete ({len(phase1_output)} chars)")
             print(f"Pattern excerpt: {phase1_output[:200]}...")
@@ -321,6 +325,9 @@ def solve_task(
             system_prompt="You are an expert at generating Python code using DSL primitives to solve ARC puzzles."
         )
         
+        with open('../logs/output.json', 'w') as f:
+            json.dump(phase1_output, f, indent=2)
+        
         if verbose:
             print(f"Phase 2 complete ({len(phase2_output)} chars)")
         
@@ -385,7 +392,6 @@ def solve_task(
             library.add(task_id, phase1_output, final_program)
             if verbose:
                 print(f"Added to library")
-            
             # Update cache file (optional - for persistence)
             try:
                 library.save('library_cache.json')

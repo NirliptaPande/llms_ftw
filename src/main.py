@@ -17,7 +17,7 @@ sys.stdout.flush()
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from vlm_prompter import VLMPrompter
-from vlm_client import VLMClient, VLMConfig
+from vlm_client import VLMConfig, create_client, BaseVLMClient
 from utils.library import ProgramLibrary, calculate_grid_similarity
 from utils.dsl import *
 from utils.constants import *
@@ -97,8 +97,8 @@ def extract_code_from_response(response: str) -> Optional[str]:
 def solve_task(
     task: Dict,
     task_id: str,
-    vlm_client_phase1: VLMClient,
-    vlm_client_phase2: VLMClient,
+    vlm_client_phase1: BaseVLMClient,
+    vlm_client_phase2: BaseVLMClient,
     prompter: VLMPrompter,
     library: ProgramLibrary,
     verbose: bool = True,
@@ -395,8 +395,8 @@ Combat this by generating alternatives and actively seeking evidence against you
 
 def process_directory(
     data_dir: str,
-    vlm_client_phase1: VLMClient,
-    vlm_client_phase2: VLMClient,
+    vlm_client_phase1: BaseVLMClient,
+    vlm_client_phase2: BaseVLMClient,
     prompter: VLMPrompter,
     library: ProgramLibrary,
     verbose: bool = True,
@@ -517,20 +517,37 @@ def main():
     """Main entry point"""
     # print("Initializing components...", flush=True)
     load_dotenv()
-    api_key = os.getenv('GROK_API_KEY')
+    PROVIDER = "gemini"
+    if PROVIDER == "grok":
+        api_key = os.getenv('GROK_API_KEY')
+        api_base = "https://api.x.ai/v1"
+        model = "grok-4-fast"
+    elif PROVIDER == "qwen":
+        api_key = None
+        api_base = "http://localhost:8000/v1"
+        model = "Qwen/Qwen2.5-7B-Instruct"
+    elif PROVIDER == "gemini":
+        api_key = os.getenv('GEMINI_API_KEY')
+        api_base = "https://generativelanguage.googleapis.com/v1beta"
+        model = "gemini-2.5-pro"
+        
     vlm_config_phase1 = VLMConfig(
         api_key=api_key,
+        model=model,
+        api_base=api_base,
         max_tokens=16384  # Longer for analysis
     )
     vlm_config_phase2 = VLMConfig(
         api_key=api_key,
+        model=model,
+        api_base=api_base,
         max_tokens=8192   # Shorter for code gen
     )
     
-    vlm_client_phase1 = VLMClient(config=vlm_config_phase1)
+    vlm_client_phase1 = create_client(PROVIDER, config=vlm_config_phase1)
     # print("VLM client created", flush=True)
     
-    vlm_client_phase2 = VLMClient(config=vlm_config_phase2)
+    vlm_client_phase2 = create_client(PROVIDER, config=vlm_config_phase2)
     prompter = VLMPrompter()
     # print("Prompter created", flush=True)
     
@@ -543,7 +560,7 @@ def main():
     
     # Configure parallelization
     results = process_directory(
-        data_dir='data_v2/evaluation',
+        data_dir='data_v1/eval_size_10',
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,

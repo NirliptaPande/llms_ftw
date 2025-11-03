@@ -1,4 +1,4 @@
-from src.utils.arc_types import *
+from utils.arc_types import *
 
 
 def identity(

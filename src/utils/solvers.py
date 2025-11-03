@@ -1,5 +1,5 @@
-from src.utils.dsl import *
-from src.utils.constants import *
+from utils.dsl import *
+from utils.constants import *
 
 
 def solve_67a3c6ac(I):

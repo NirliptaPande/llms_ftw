@@ -17,9 +17,9 @@ class VLMConfig:
     api_base: str = "https://api.x.ai/v1"
     max_tokens: int = 4096
     temperature: float = 0.7
-    timeout: int = 60
-    max_retries: int = 3
-    retry_delay: int = 2
+    timeout: int = 240
+    max_retries: int = 1
+    retry_delay: float = 1.0  # seconds
 
 class VLMClient:
     """Client for Grok API interactions"""

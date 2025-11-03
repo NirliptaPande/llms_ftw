@@ -10,13 +10,17 @@ Usage:
 import sys
 import os
 from library import ProgramLibrary, extract_functions
+from pathlib import Path
 
+path = Path(__file__).resolve().parent
 def load_dsl():
     """Load DSL into namespace"""
     print("Loading DSL...")
     dsl_globals = {}
     try:
-        with open('./src/utils/dsl.py', 'r') as f:
+        
+        # dsl_path = Path(__file__).resolve().parent
+        with open(path/'dsl.py', 'r') as f:
             dsl_code = f.read()
         exec(dsl_code, dsl_globals)
         count = len([k for k in dsl_globals.keys() if not k.startswith('_')])
@@ -32,7 +36,7 @@ def load_solvers(solvers_path: str, library: ProgramLibrary, dsl_globals: dict):
     import re
     
     try:
-        with open(solvers_path, 'r') as f:
+        with open(path/'solvers.py', 'r') as f:
             solvers_code = f.read()
         
         # Execute to get all solve functions
@@ -58,7 +62,7 @@ def load_solvers(solvers_path: str, library: ProgramLibrary, dsl_globals: dict):
                     keywords = extract_functions(func_code)
                     
                     # Add to library
-                    library.add(task_id, func_code, func_code)
+                    library.add(task_id, func_code)
                     
                     count += 1
                     print(f"  ✓ {task_id}: {len(keywords)} keywords - {', '.join(sorted(list(keywords)[:5]))}{'...' if len(keywords) > 5 else ''}")
@@ -98,7 +102,7 @@ def build_library(force_rebuild=False):
     
     # Load all solvers
     print("Loading solvers from solvers.py...\n")
-    count = load_solvers('./src/utils/solvers.py', library, dsl_globals)
+    count = load_solvers('solvers.py', library, dsl_globals)
     
     # Save to cache
     print(f"\nSaving library to {cache_file}...")

@@ -5,3 +5,9 @@ __pycache__/
 library_cache.json
 /data_v2
 /logs
+/results
+/testing_run.err
+/testing_run.out
+/testing.slurm
+.vscode/
+src/results

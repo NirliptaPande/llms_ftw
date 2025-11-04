@@ -19,6 +19,32 @@ from utils.constants import *
 from . import solvers
 
 
+def pad_grid(grid,height, width, fill):
+    assert isinstance(grid, tuple)
+    new_grid = []
+    for j in range(height):
+        new_row=[]
+        for i in range(width):
+            if len(grid[0])>i and len(grid)>j:
+                new_row.append(grid[j][i])
+            else:
+                new_row.append(fill)
+        new_grid.append(new_row)
+    new_grid = tuple(tuple(row) if isinstance(row, list) else row for row in new_grid)
+    if len(grid[0])==width and len(grid)==height:
+        assert new_grid==grid
+    else:
+        assert len(new_grid)==height
+        assert len(new_grid[0])==width
+        for j in range(len(new_grid)):
+            for i in range(len(new_grid[0])):
+                if j<len(grid) and i<len(grid[0]):
+                    assert new_grid[j][i]==grid[j][i]
+                else:
+                    assert new_grid[j][i]==fill
+    return new_grid
+
+
 def calculate_grid_similarity(predicted: Any, expected: Any) -> float:
     """
     Calculate similarity between two grids.
@@ -47,23 +73,23 @@ def calculate_grid_similarity(predicted: Any, expected: Any) -> float:
         
         # Dimension mismatch penalty
         if pred_h != exp_h or pred_w != exp_w:
-            overlap_h = min(pred_h, exp_h)
-            overlap_w = min(pred_w, exp_w)
             max_h = max(pred_h, exp_h)
             max_w = max(pred_w, exp_w)
+
+            predicted=pad_grid(grid=predicted,height=max_h, width=max_w, fill=-1)
+            expected=pad_grid(grid=expected,height=max_h, width=max_w, fill=-2)
             
             correct = 0
-            total = overlap_h * overlap_w
+            total = max_h*max_w
             
-            for i in range(overlap_h):
-                for j in range(overlap_w):
+            for i in range(max_h):
+                for j in range(max_w):
                     if predicted[i][j] == expected[i][j]:
                         correct += 1
             
-            dim_penalty = (overlap_h * overlap_w) / (max_h * max_w)
             cell_accuracy = correct / total if total > 0 else 0.0
             
-            return cell_accuracy * dim_penalty * 0.5
+            return cell_accuracy
         
         # Exact dimension match - calculate cell accuracy
         total_cells = pred_h * pred_w

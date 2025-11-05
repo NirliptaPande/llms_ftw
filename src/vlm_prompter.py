@@ -1,9 +1,11 @@
 """
-Refactored VLM Prompter for ARC DSL-based solver.
+Refactored VLM Prompter for ARC DSL-based solver with image support.
 New pipeline: Program Similarity → Pattern Discovery → Code Generation
 """
 
 from typing import List, Tuple, Dict, Any
+import numpy as np
+from utils.render_legacy import grid_to_base64_png_oai_content
 
 
 class VLMPrompter:
@@ -11,11 +13,11 @@ class VLMPrompter:
     
     def __init__(self):
         self.phase1_template = self._load_phase1_template()
-        self.phase2_template = self._load_phase2_template()
+        # self.phase2_template = self._load_phase2_template()
     
     def build_phase1_prompt(self, 
                            task: Dict[str, Any],
-                           similar_programs: List[Dict[str, Any]] = None) -> str:
+                           similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
         Build Phase 1 prompt: Natural Language Pattern Discovery
         Analyzes training examples AND similar programs to discover transformation pattern.
@@ -26,56 +28,108 @@ class VLMPrompter:
                              Each dict has: {'program': str, 'similarity': float, 'task_id': str}
             
         Returns:
-            Complete prompt string for natural language pattern analysis
+            List of content blocks (dicts) for multimodal prompt
         """
-        # Format training examples
-        examples_str = self._format_training_examples(task['train'])
+        content_blocks = []
         
-        # Format similar programs
+        # Add header
+        content_blocks.append({
+            "type": "text",
+            "text": "## Training Examples\n"
+        })
+        
+        # Format training examples (with images)
+        content_blocks.extend(self._format_training_examples(task['train']))
+        
+        # Add similar programs section
+        content_blocks.append({
+            "type": "text",
+            "text": "\n## Similar Programs from Library\n"
+        })
+        
         if similar_programs:
-            similar_str = self._format_similar_programs_for_phase1(similar_programs)
+            similar_str = self._format_similar_programs(similar_programs)
         else:
             similar_str = "[No similar programs found in library]"
         
-        # Insert into template
-        prompt = self.phase1_template.replace('[INSERT TASK EXAMPLES HERE]', examples_str)
-        prompt = prompt.replace('[INSERT SIMILAR PROGRAMS HERE]', similar_str)
+        content_blocks.append({
+            "type": "text",
+            "text": similar_str
+        })
         
-        return prompt
+        # Add the analysis protocol template
+        content_blocks.append({
+            "type": "text",
+            "text": self.phase1_template
+        })
+        
+        return content_blocks
     
     def build_phase2_prompt(self,
                             task: Dict[str, Any], 
                            phase1_output: str,
-                           similar_programs: List[Dict[str, Any]] = None) -> str:
+                           similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
         Build Phase 2 prompt: Code Generation
         Generates solve() function based on natural language pattern and similar programs.
         
         Args:
+            task: Dict with 'train' key containing list of {'input': grid, 'output': grid}
             phase1_output: The natural language pattern description from Phase 1
             similar_programs: Same list of similar programs (for reference during coding)
             
         Returns:
-            Complete prompt string for code generation
+            List of content blocks (dicts) for multimodal prompt
         """
-        # Format training examples
-        examples_str = self._format_training_examples(task['train'])
-        prompt = self.phase2_template.replace('[INSERT TASK EXAMPLES HERE]', examples_str)
+        content_blocks = []
+        
+        # Add header
+        content_blocks.append({
+            "type": "text",
+            "text": "# DSL Code Generator\nGenerate a Python `solve(I)` function using ONLY the DSL primitives below.\n\n"
+        })
+        
+        # Add training examples section
+        content_blocks.append({
+            "type": "text",
+            "text": "## Training Examples\n"
+        })
+        
+        # Format training examples (with images)
+        content_blocks.extend(self._format_training_examples(task['train']))
+        
         # Extract the key sections from Phase 1 output
         extracted_pattern = self._extract_key_pattern_from_phase1(phase1_output)
         
-        # Insert extracted pattern
-        prompt = self.phase2_template.replace('[PHASE 1 PATTERN DESCRIPTION]', extracted_pattern)
+        # Add pattern description
+        content_blocks.append({
+            "type": "text",
+            "text": f"\n## Natural Language Pattern Description\n{extracted_pattern}\n"
+        })
         
-        # Insert similar programs if available
+        # Add similar programs section
+        content_blocks.append({
+            "type": "text",
+            "text": "\n## Similar Programs for Reference\nThe following programs solved similar tasks and may provide useful patterns or approaches:\n\n"
+        })
+        
         if similar_programs:
-            similar_str = self._format_similar_programs_for_phase2(similar_programs)
+            similar_str = self._format_similar_programs(similar_programs)
         else:
             similar_str = "[No similar programs available for reference]"
         
-        prompt = prompt.replace('[SIMILAR PROGRAMS FOR REFERENCE]', similar_str)
+        content_blocks.append({
+            "type": "text",
+            "text": similar_str
+        })
         
-        return prompt
+        # Add DSL primitives and the rest of the template
+        content_blocks.append({
+            "type": "text",
+            "text": self._get_phase2_dsl_section()
+        })
+        
+        return content_blocks
     
     def _extract_key_pattern_from_phase1(self, phase1_output: str) -> str:
         """
@@ -108,28 +162,62 @@ class VLMPrompter:
         # Fallback: use the entire output
         return phase1_output
     
-    def _format_training_examples(self, train_examples: List[Dict[str, Any]]) -> str:
-        """Format training examples for display"""
-        lines = []
-        
+    def _format_training_examples(self, train_examples: List[Dict[str, Any]], include_images: bool = True) -> List[Dict[str, Any]]:
+        """Format training examples as content blocks with images"""
+        content_blocks = []
+        content_blocks.append({
+            "type": "text",
+            "text": f"Below are {len(train_examples)} training examples:\n for each example, the input grid is shown first, followed by the output grid.\n."
+        })
         for idx, example in enumerate(train_examples, 1):
-            lines.append(f"Example {idx}:")
-            lines.append("Input:")
-            lines.append(self._format_grid(example['input']))
-            lines.append("Output:")
-            lines.append(self._format_grid(example['output']))
-            lines.append("")
-        
-        return "\n".join(lines)
+            # Example header
+            content_blocks.append({
+                "type": "text",
+                "text": f"\nExample {idx}:\n"
+            })
+            
+            # Input section
+            content_blocks.append({
+                "type": "text",
+                "text": "Input:\n"
+            })
+            
+            # Input image - conditional
+            if include_images:
+                input_grid = np.array(example['input'])
+                content_blocks.append(grid_to_base64_png_oai_content(input_grid))
+            
+            # Input ASCII (optional, for reference)
+            content_blocks.append({
+                "type": "text",
+                "text": f"\nASCII representation:\n{self._format_grid(example['input'], separator='|')}\n"
+            })
+            
+            # Output section
+            content_blocks.append({
+                "type": "text",
+                "text": "\nOutput:\n"
+            })
+            
+            # Output image - conditional
+            if include_images:
+                output_grid = np.array(example['output'])
+                content_blocks.append(grid_to_base64_png_oai_content(output_grid))
+            
+            # Output ASCII (optional, for reference)
+            content_blocks.append({
+                "type": "text",
+                "text": f"\nASCII representation:\n{self._format_grid(example['output'], separator='|')}\n"
+            })
     
-    def _format_grid(self, grid: Tuple[Tuple[int]]) -> str:
-        """Format grid as readable ASCII"""
-        return "\n".join("".join(str(cell) for cell in row) for row in grid)
+        return content_blocks   
+    def _format_grid(self, grid: Tuple[Tuple[int]], separator: str = "|") -> str:
+        return "\n".join(separator.join(str(cell) for cell in row) for row in grid)
     
-    def _format_similar_programs_for_phase1(self, similar_programs: List[Dict[str, Any]]) -> str:
+    def _format_similar_programs(self, similar_programs: List[Dict[str, Any]]) -> str:
         """Format similar programs for Phase 1 (natural language discovery)"""
         lines = []
-        lines.append("The following programs from the library solved similar tasks:\n")
+        lines.append("The following programs may be useful to solve the current tasks, feel free to use parts of each program, and/or combine them. Most importanly, use them as guidance:\n")
         
         for idx, prog in enumerate(similar_programs, 1):
             similarity = prog.get('similarity', 0.0)
@@ -144,30 +232,8 @@ class VLMPrompter:
         
         return "\n".join(lines)
     
-    def _format_similar_programs_for_phase2(self, similar_programs: List[Dict[str, Any]]) -> str:
-        """Format similar programs for Phase 2 (code generation reference)"""
-        lines = []
-        
-        for idx, prog in enumerate(similar_programs, 1):
-            similarity = prog.get('similarity', 0.0)
-            program_code = prog.get('program', '')
-            task_id = prog.get('task_id', 'unknown')
-            
-            lines.append(f"```python")
-            lines.append(f"# Similar program {idx} (similarity: {similarity:.2f}, task: {task_id})")
-            lines.append(program_code)
-            lines.append("```")
-            lines.append("")
-        
-        return "\n".join(lines)
-    
     def _load_phase1_template(self) -> str:
-        return r"""## Training Examples
-[INSERT TASK EXAMPLES HERE]
-
-## Similar Programs from Library
-[INSERT SIMILAR PROGRAMS HERE]
-
+        return r"""
 ## Analysis Protocol
 
 You will analyze these examples systematically, allowing your hypothesis to evolve 
@@ -178,208 +244,81 @@ and SIMILARITIES across all examples (the consistent pattern).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-### STEP 1: First Observations & Comparison
+Work through examples sequentially, reasoning in plain English about what you observe.
 
-For each example, describe what you see (objects, not pixels):
+Step 1.1: First Example Analysis
+Given: Input 1 → Output 1
 
-**Example 1:**
-- Input: [objects, colors, spatial layout]
-- Output: [objects, colors, spatial layout]
-- What CHANGES: [list differences]
-- What STAYS SAME: [list constants]
+<observation_1>
+Describe what you see:
 
-**Example 2:**
-- Input: [objects, colors, spatial layout]
-- Output: [objects, colors, spatial layout]
-- What CHANGES: [list differences]
-- What STAYS SAME: [list constants]
+    What's the size/shape change?
 
-**Example 3:**
-- Input: [objects, colors, spatial layout]
-- Output: [objects, colors, spatial layout]
-- What CHANGES: [list differences]
-- What STAYS SAME: [list constants]
+What colors changed?What geometric transformations occurred?What patterns do you notice?</observation_1>
 
-**Comparison Matrix** (find patterns):
+<hypothesis_1>
+State your initial guess about the transformation rule in natural language.
+Example: "The grid appears to be flipped horizontally"
+</hypothesis_1>
 
-| Feature | Ex1 | Ex2 | Ex3 | Pattern? |
-|---------|-----|-----|-----|----------|
-| # input objects | | | | [Varies / Always X / ...] |
-| # output objects | | | | [Pattern description] |
-| Grid size changes? | | | | [Y/N and how] |
-| Colors preserved? | | | | [Pattern description] |
-| Spatial relationship | | | | [Pattern description] |
-| [Add custom rows] | | | | |
+Step 1.2: Second Example Validation
+Given: Input 2 → Output 2
 
-**Key similarities across ALL examples:**
-[What is CONSISTENT in all transformations?]
+<observation_2>
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    Does your hypothesis from Example 1 still hold?
 
-### STEP 2: Hypothesis Evolution Through Examples
+What's similar to Example 1?What's different from Example 1?</observation_2>
 
-**From Example 1:**
-Initial hypothesis: [Describe transformation as object/action sequence]
-Confidence: Low/Medium/High - [Why?]
+<hypothesis_2>
+Refine your hypothesis:
 
-**Testing on Example 2:**
-Does initial hypothesis explain Example 2? ✓ / ✗
-- If ✗: What's wrong or missing?
-- If ✓: What additional details does Example 2 reveal?
+    If it still works: Confirm and strengthen
 
-Evolved hypothesis: [Refined transformation description]
-Confidence: Low/Medium/High - [Why?]
+If it breaks: Revise with a more general patternExample: "Actually, it's mirrored horizontally, THEN the original is stacked on top"
+</hypothesis_2>
 
-**Testing on Example 3:**
-Does evolved hypothesis explain Example 3? ✓ / ✗
-- If ✗: What's wrong or missing?
-- If ✓: What additional constraints does Example 3 reveal?
+Step 1.3: Third Example Confirmation
+Given: Input 3 → Output 3
 
-Refined hypothesis: [Final refined transformation description]
-Confidence: Low/Medium/High - [Why?]
+<observation_3>
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    Does hypothesis_2 work here?
 
-### STEP 3: Similar Programs Analysis
+Any new edge cases or variations?</observation_3>
 
-**Review the library programs** (shown above with similarity scores):
+<hypothesis_3>
+Final refined hypothesis in natural language.
+</hypothesis_3>
 
-For each similar program:
-- Task ID: [X] - Similarity: [score]
-- What transformation does it do? [describe in object/action terms]
-- WHY might it be similar? [what execution pattern is shared?]
-- Does it suggest anything about your hypothesis? [insights]
+Step 1.N: Additional Examples
+Continue for all remaining examples...
 
-**Important:** High similarity ≠ same logic. These may solve DIFFERENT patterns 
-that happen to produce similar input/output relationships. Use as inspiration, 
-not as a template.
+Step 1.Final: Pattern Synthesis
+<pattern_summary>
+In plain English, the transformation rule is:
 
-**Key insight from similar programs:**
-[Do they suggest your hypothesis, an alternative, or something you missed?]
+    [First operation in natural language]
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[Second operation in natural language][Any conditions or special cases]
+Edge cases to consider:
 
-### STEP 4: Generate Alternative Hypotheses
+    [Any variations you noticed]
 
-Now generate at least 2 alternatives that ALSO explain all examples but use 
-different reasoning:
 
-**Primary (evolved from Steps 1-2):** 
-[Your refined hypothesis]
+Why this works:
 
-**Alternative A:** 
-[Different object/action interpretation]
-- Why it could work: [evidence from examples]
-- Why it might be better/worse than primary: [reasoning]
-- Key difference from primary: [what's fundamentally different?]
+    [Your reasoning about WHY this pattern makes sense]
 
-**Alternative B:** 
-[Another different interpretation]
-- Why it could work: [evidence from examples]
-- Why it might be better/worse than primary: [reasoning]
-- Key difference from primary: [what's fundamentally different?]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-### STEP 5: Lock-in Checkpoint ⚠️ (where you usually fail)
-
-Before committing, force these checks:
-
-**A. Evolution check:**
-Looking back at Steps 1-2, did you genuinely evolve your hypothesis based on 
-new evidence, or did you rationalize away problems to keep your first guess?
-
-Red flags: "it mostly works", "except for this one case", "basically the same"
-
-Honest assessment: [Did I force-fit? Y/N and why]
-
-**B. Alternative comparison:**
-Test each hypothesis fairly:
-
-| Hypothesis | Ex1 Match | Ex2 Match | Ex3 Match | # Special Cases | Simplicity |
-|------------|-----------|-----------|-----------|-----------------|------------|
-| Primary | ✓/✗ | ✓/✗ | ✓/✗ | [count] | [1-5] |
-| Alternative A | ✓/✗ | ✓/✗ | ✓/✗ | [count] | [1-5] |
-| Alternative B | ✓/✗ | ✓/✗ | ✓/✗ | [count] | [1-5] |
-
-**C. Confidence breakdown:**
-Rate your confidence on different aspects:
-
-- Pattern explains Example 1: [Low/Med/High] - [Why?]
-- Pattern explains Example 2: [Low/Med/High] - [Why?]
-- Pattern explains Example 3: [Low/Med/High] - [Why?]
-- Pattern is simple/intuitive: [Low/Med/High] - [Why?]
-- Pattern captures ALL similarities: [Low/Med/High] - [Why?]
-
-Overall confidence: [X%]
-What would increase confidence: [what evidence/test?]
-What would decrease confidence: [what would disprove it?]
-
-**D. Similarity verification:**
-Does your chosen hypothesis explain:
-- The DIFFERENCES within each example? ✓ / ✗
-- The SIMILARITIES across all examples? ✓ / ✗
-
-The core pattern across all examples is: [state it clearly]
-My hypothesis captures this because: [explain connection]
-
-**E. Simplicity test:**
-Explain your hypothesis in ONE sentence (like explaining to a friend):
-[State it]
-
-If this explanation is convoluted or has many "except when" clauses, 
-it's probably wrong.
-
-**F. Disconfirming evidence hunt:**
-Actively search for evidence AGAINST your primary hypothesis:
-- What doesn't quite fit? [list]
-- What should be there but isn't? [list]
-- Which example fits least well? [Example X because...]
-
-**Decision:** Stick with primary or switch to alternative? 
-[Choice] because [specific reasoning based on checks A-F]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-### STEP 6: Final Transformation Rule
-
-**Pattern:** [1-2 sentence description in object/action language]
-
-**Reasoning:**
-[Explain WHY this pattern makes sense - what's the underlying logic?]
-
-**Step-by-step process:**
-1. [First: what to identify/find]
-2. [Second: what action to perform]
-3. [Third: how to produce output]
-[Add more steps if needed for multi-stage transformations]
-
-**Conditions/Constraints:** 
-[Any "if-then" rules or special cases: "if X then Y, otherwise Z"]
-
-**Why this works:**
-[Brief explanation of why this pattern explains all examples and their similarities]
+</pattern_summary>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Begin your analysis:"""
     
-    def _load_phase2_template(self) -> str:
-        """Phase 2: Code Generator Template"""
-        return """# DSL Code Generator
-Generate a Python `solve(I)` function using ONLY the DSL primitives below.
-
-## Training Examples
-[INSERT TASK EXAMPLES HERE]
-
-## Natural Language Pattern Description
-[PHASE 1 PATTERN DESCRIPTION]
-
-## Similar Programs for Reference
-The following programs solved similar tasks and may provide useful patterns or approaches:
-
-[SIMILAR PROGRAMS FOR REFERENCE]
-
+    def _get_phase2_dsl_section(self) -> str:
+        """Phase 2: DSL Primitives and Code Generation Instructions"""
+        return """
 ## DSL Primitives
 
 **Type Definitions:**

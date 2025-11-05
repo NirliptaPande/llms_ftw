@@ -21,6 +21,7 @@ from vlm_client import VLMConfig, create_client, BaseVLMClient
 from utils.library import ProgramLibrary, calculate_grid_similarity
 from utils.dsl import *
 from utils.constants import *
+# from utils.render_legacy import grid_to_base64_png_oai_content
 
 print("Imports done...", flush=True)
 sys.stdout.flush()
@@ -142,8 +143,8 @@ def solve_task(
         
         similar_programs = library.find_similar(
             train_examples=task['train'],
-            top_k=40,
-            min_similarity=0.0,
+            top_k=5,
+            min_similarity=0.1,
             n_workers=n_workers,
             timeout=timeout
         )
@@ -190,58 +191,10 @@ def solve_task(
         
         phase1_output = vlm_client_phase1.query(
             phase1_prompt,
-            system_prompt=""""You are an expert at solving ARC puzzles by thinking like a human playing a visual puzzle game.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-CRITICAL COGNITIVE FRAME:
-
-These puzzles exist in an OBJECT/ACTION space, not a pixel coordinate space.
-Think compositionally like playing Pacman, Sokoban, or Tetris:
-
-✓ GOOD: "Extract the largest red object, rotate it 90°, align with top border"
-✓ GOOD: "Red pixels shoot downward in free vertical lanes until hitting a wall"
-✓ GOOD: "Fill each enclosed region with the color of its boundary"
-
-✗ BAD: "Pixels at positions where value > 0 and row == col become value 7"
-✗ BAD: "Apply transformation matrix to coordinates meeting condition X"
-
-Objects: Connected components, shapes, borders, regions, bounding boxes
-Actions: Extract, rotate, shoot, bounce, fill, merge, filter, align, crop
-
-Think as sequences: "First find X, then do Y to it, then place result at Z"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-KNOWN FAILURE MODES:
-
-1. Premature narrowing: You lock onto your first hypothesis from Example 1 
-   and force-fit it to other examples, rationalizing discrepancies.
-
-2. Imagined verification: You believe you've checked all examples thoroughly 
-   when you've only done surface-level pattern matching on Example 1.
-
-3. Pixel-space thinking: You fall back on coordinate transforms and 
-   pixel-by-pixel operations instead of object-level reasoning.
-
-4. Over-complexity: You create convoluted multi-case rules when a simpler 
-   compositional sequence would work better.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-CORE INSTRUCTIONS:
-
-- Observe pixels, but REASON about objects and actions
-- Generate multiple diverse hypotheses before committing (not just variations of the same idea)
-- State explicit disproof criteria: "This hypothesis dies if Example 2 shows X"
-- Before finalizing, actively ask: "Did I narrow prematurely? What else could explain these patterns?"
-- Simpler is usually correct: if you can't explain it to a 10-year-old, revisit your logic
-- The transformation should make intuitive visual sense, like a game mechanic
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            system_prompt=""""You are an expert at analyzing ARC puzzles and discovering transformation patterns.
 
 Remember: Your first hypothesis is sticky and excessively convincing to you.
-Combat this by generating alternatives and actively seeking evidence against your initial guess.
+Combat this by evolving your hypothesis and actively seeking evidence against your initial guess to avoid halluciantion.
 """
         )
         
@@ -272,7 +225,7 @@ Combat this by generating alternatives and actively seeking evidence against you
         
         phase2_output = vlm_client_phase2.query(
             phase2_prompt,
-            system_prompt="You are an expert at generating Python code using the given DSL primitives to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training examples. Generate a Python function `def solve(I):` that implements the described transformation using ONLY the provided DSL primitives. Ensure your code is syntactically correct and follows best practices."
+            system_prompt="You are an expert at generating code using the given DSL primitives to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training examples and some similar programs you might find useful as reference. Generate a Python function `def solve(I):` that implements the described transformation using ONLY the provided DSL primitives. Ensure your code is syntactically correct and follows best practices."
         )
         
         if verbose:
@@ -449,7 +402,8 @@ def process_directory(
                 library=library,
                 verbose=verbose,
                 n_workers=n_workers,
-                timeout=timeout
+                timeout=timeout,
+                log_dir="logs_old"
             )
             
             results.append(result)
@@ -517,7 +471,7 @@ def main():
     """Main entry point"""
     # print("Initializing components...", flush=True)
     load_dotenv()
-    PROVIDER = "gemini"
+    PROVIDER = "grok"
     if PROVIDER == "grok":
         api_key = os.getenv('GROK_API_KEY')
         api_base = "https://api.x.ai/v1"
@@ -528,14 +482,16 @@ def main():
         model = "Qwen/Qwen2.5-7B-Instruct"
     elif PROVIDER == "gemini":
         api_key = os.getenv('GEMINI_API_KEY')
-        api_base = "https://generativelanguage.googleapis.com/v1beta"
+        api_base = "https://generativelanguage.googleapis.com/v1beta/models/"
         model = "gemini-2.5-pro"
         
     vlm_config_phase1 = VLMConfig(
         api_key=api_key,
         model=model,
         api_base=api_base,
-        max_tokens=16384  # Longer for analysis
+        max_tokens=16384,  # Longer for analysis
+        save_prompts=False,
+        prompt_log_dir="prompts_testing"
     )
     vlm_config_phase2 = VLMConfig(
         api_key=api_key,
@@ -560,7 +516,7 @@ def main():
     
     # Configure parallelization
     results = process_directory(
-        data_dir='data_v1/eval_size_10',
+        data_dir='data_v2/evaluation',
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,
@@ -570,7 +526,7 @@ def main():
         timeout=2        # 2 second timeout per program
     )
     
-    save_results(results, output_dir='results/eval_new')
+    save_results(results, output_dir='results/images')
 
 
 if __name__ == "__main__":

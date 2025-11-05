@@ -11,3 +11,5 @@ library_cache.json
 /testing.slurm
 .vscode/
 src/results
+/logs_*
+/prompts_testing

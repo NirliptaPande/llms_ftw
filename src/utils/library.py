@@ -14,9 +14,9 @@ import multiprocessing as mp
 from functools import partial
 from typing import List, Dict, Set, Tuple, Any
 
-from utils.dsl import *
-from utils.constants import *
-from . import solvers
+from src.utils.dsl import *
+from src.utils.constants import *
+from src.utils import solvers
 
 
 def pad_grid(grid,height, width, fill):
@@ -247,7 +247,7 @@ class ProgramLibrary:
     def _load_solvers_from_module(self):
         """Load all solve_* functions from solvers.py"""
         try:
-            from . import solvers
+            from src.utils import solvers
             
             for name, obj in inspect.getmembers(solvers):
                 if name.startswith('solve_') and callable(obj):

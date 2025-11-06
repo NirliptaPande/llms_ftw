@@ -110,11 +110,23 @@ Complete pipeline for solving ARC (Abstraction and Reasoning Corpus) tasks using
 
 ```bash
 # Install dependencies
-pip install requests
+
+pip install -e .
+pip install "sglang" 
+
+# to dl eval task
+mkdir tasks
+cd tasks
+curl -L https://github.com/arcprize/ARC-AGI-2/archive/refs/heads/main.tar.gz | tar xz ARC-AGI-2-main/data/evaluation --strip-components=2 -C .
+
+
+# if bug with sglang this can be usefull:
+conda install -c conda-forge libstdcxx-ng --update-deps
 
 # Set API key
 export GROK_API_KEY=your_grok_api_key_here
 ```
+
 
 ### 2. Prepare Your Files
 

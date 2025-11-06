@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llms_ftw"
+version = "0.1.0"
+description = "llms_ftw"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Nirlipta", email = "nirlipta@example.com" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/NirliptaPande/llms_ftw/"
+
+# Tell setuptools to discover packages from the repo root and only include 'llms_ftw'
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

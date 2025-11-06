@@ -5,14 +5,15 @@ New pipeline: Program Similarity → Pattern Discovery → Code Generation
 
 from typing import List, Tuple, Dict, Any
 import numpy as np
-from utils.render_legacy import grid_to_base64_png_oai_content
+from src.utils.render_legacy import grid_to_base64_png_oai_content
 
 
 class VLMPrompter:
     """Builds prompts for the program-first ARC solving process"""
     
-    def __init__(self):
+    def __init__(self,use_vision: bool = True):
         self.phase1_template = self._load_phase1_template()
+        self.use_vision = use_vision
         # self.phase2_template = self._load_phase2_template()
     
     def build_phase1_prompt(self, 
@@ -162,8 +163,9 @@ class VLMPrompter:
         # Fallback: use the entire output
         return phase1_output
     
-    def _format_training_examples(self, train_examples: List[Dict[str, Any]], include_images: bool = True) -> List[Dict[str, Any]]:
+    def _format_training_examples(self, train_examples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Format training examples as content blocks with images"""
+        include_images = self.use_vision
         content_blocks = []
         content_blocks.append({
             "type": "text",

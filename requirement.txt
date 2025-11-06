@@ -1,0 +1,4 @@
+pillow
+request
+pydantic
+python-dotenv

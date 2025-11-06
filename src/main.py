@@ -403,7 +403,7 @@ def process_directory(
                 verbose=verbose,
                 n_workers=n_workers,
                 timeout=timeout,
-                log_dir="logs_old"
+                log_dir="logs_images"#TODO change log dir
             )
             
             results.append(result)
@@ -526,7 +526,7 @@ def main():
         timeout=2        # 2 second timeout per program
     )
     
-    save_results(results, output_dir='results/images')
+    save_results(results, output_dir='results/images')#TODO change output dir
 
 
 if __name__ == "__main__":

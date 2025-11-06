@@ -516,7 +516,7 @@ def main():
     
     # Configure parallelization
     results = process_directory(
-        data_dir='data_v2/evaluation',
+        data_dir='data_v1/eval_size_10',
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,

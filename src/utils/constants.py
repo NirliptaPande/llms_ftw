@@ -1,17 +1,24 @@
-F = False
-T = True
+import os
+from .arc_types import Color
 
-ZERO = 0
-ONE = 1
-TWO = 2
-THREE = 3
-FOUR = 4
-FIVE = 5
-SIX = 6
-SEVEN = 7
-EIGHT = 8
-NINE = 9
-TEN = 10
+
+# This is the default behaviour
+COLOR_BELOW: Color = -1
+COLOR_ZERO: Color = 0
+COLOR_ONE: Color = 1
+COLOR_TWO: Color = 2
+COLOR_THREE: Color = 3
+COLOR_FOUR: Color = 4
+COLOR_FIVE: Color = 5
+COLOR_SIX: Color = 6
+COLOR_SEVEN: Color = 7
+COLOR_EIGHT: Color = 8
+COLOR_NINE: Color = 9
+#COLOR_TEN: Color = 10
+COLOR_ABOVE: Color = 10
+
+#F = False
+#T = True
 
 NEG_ONE = -1
 NEG_TWO = -2

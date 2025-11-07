@@ -120,7 +120,7 @@ conda activate arcn
 pip install "sglang" 
 
 pip install -e .
-
+pip install -r requirement.txt
 # to dl eval task
 mkdir tasks
 cd tasks

@@ -15,6 +15,8 @@ parser.add_argument('--temperature', type=float, default=0.7)
 parser.add_argument('--top_k', type=int, default=20)
 parser.add_argument('--top_p', type=float, default=0.8)
 parser.add_argument('--gpu', type=int, default=1)
+parser.add_argument('--nodes', type=int, default=1)
+
 parser.add_argument('--reasoning_effort', type=str, default="low")
 parser.add_argument('--path_save', type=str, default='/home/flowers/work/llms_ftw/save_data/test.pkl')
 parser.add_argument('--mode', type=str, default='nir')

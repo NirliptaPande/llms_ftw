@@ -33,6 +33,8 @@ parser.add_argument('--temperature', type=float, default=0.7)
 parser.add_argument('--top_k', type=int, default=20)
 parser.add_argument('--top_p', type=float, default=0.8)
 parser.add_argument('--gpu', type=int, default=1)
+parser.add_argument('--max_model_length', type=int, default=50000)
+
 parser.add_argument('--reasoning_effort', type=str, default="low")
 parser.add_argument('--path_save', type=str, default='/home/flowers/work/llms_ftw/save_data/test.pkl')
 parser.add_argument('--mode', type=str, default='nir')
@@ -48,6 +50,7 @@ llm_args.model_name_or_path = args.model_name_or_path
 llm_args.gpu = args.gpu
 llm_args.reasoning_effort = args.reasoning_effort  
 llm_args.fp8 = args.fp8
+llm_args.max_model_length = args.max_model_length
 llm_client = LLMClient(llm_args)
 
 

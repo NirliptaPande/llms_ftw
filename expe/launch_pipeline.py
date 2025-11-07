@@ -1,3 +1,4 @@
+
 import os
 import subprocess
 import argparse
@@ -16,6 +17,7 @@ parser.add_argument('--top_k', type=int, default=20)
 parser.add_argument('--top_p', type=float, default=0.8)
 parser.add_argument('--gpu', type=int, default=1)
 parser.add_argument('--nodes', type=int, default=1)
+parser.add_argument('--max_model_length', type=int, default=50000)
 
 parser.add_argument('--reasoning_effort', type=str, default="low")
 parser.add_argument('--path_save', type=str, default='/home/flowers/work/llms_ftw/save_data/test.pkl')
@@ -61,16 +63,12 @@ export CORE_PATTERN=/dev/null
 
 module load cuda/12.8.0
 conda activate {env_name}
-cd /lustre/fswork/projects/rech/imi/uqv82bm/aces/examples/p3/
+cd /lustre/fswork/projects/rech/imi/uqv82bm/llms_ftw/expe/
 
-{export_stuff}
-python full_pipeline.py --expe_name {expe_name} --data_dir {data_dir} --model_name_or_path {model_name_or_path} --temperature {temperature} --top_k {top_k} --top_p {top_p} --gpu {gpu} --reasoning_effort {reasoning_effort} --path_save {path_save} --mode {mode}
+python full_pipeline.py --expe_name {expe_name} --data_dir {data_dir} --model_name_or_path {model_name_or_path} --temperature {temperature} --top_k {top_k} --top_p {top_p} --gpu {gpu} --reasoning_effort {reasoning_effort} --path_save {path_save} --mode {mode} --max_model_length {max_model_length}
 """
 # export CUDA_VISIBLE_DEVICES={gpu}
 # export WORLD_SIZE=1
-export_stuff=""
-if args.log_level:
-    export_stuff += f"export VLLM_LOGGING_LEVEL=ERROR"
 cpu=min(24*args.gpu,96)
 # for id_part in [1, 2, 3]:
 base_path_model="/lustre/fsn1/projects/rech/imi/uqv82bm/hf/"
@@ -86,7 +84,8 @@ script = script_template.format(job_name=job_name, nodes=args.nodes,gpu=args.gpu
                                 expe_name=args.expe_name, data_dir=args.data_dir,
                                 model_name_or_path=base_path_model+args.model_name_or_path, temperature=args.temperature,
                                 top_k=args.top_k, top_p=args.top_p, reasoning_effort=args.reasoning_effort,
-                                path_save=args.path_save, mode=args.mode)
+                                path_save=args.path_save, mode=args.mode,
+                                max_model_length=args.max_model_length)
 if args.only_print:
     print(script)
     exit()

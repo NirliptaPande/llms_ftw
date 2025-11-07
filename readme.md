@@ -110,9 +110,16 @@ Complete pipeline for solving ARC (Abstraction and Reasoning Corpus) tasks using
 
 ```bash
 # Install dependencies
+module load arch/h100
+module load python/3.11.5
+
+module load cuda/12.8.0
+
+conda create -n arcn python=3.12 -y
+conda activate arcn
+pip install "sglang" 
 
 pip install -e .
-pip install "sglang" 
 
 # to dl eval task
 mkdir tasks

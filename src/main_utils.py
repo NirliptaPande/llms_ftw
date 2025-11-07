@@ -21,13 +21,14 @@ class TaskResult:
     task_id: str
     success: bool
     score: float
+    score_train: Optional[float] = None
     program: Optional[str] = None
     phase1_output: Optional[str] = None
     phase2_output: Optional[str] = None
     error: Optional[str] = None
 
 
-def test_program(program_code: str, task: Dict) -> Tuple[float, List[Tuple[Any, Any, bool]]]:
+def test_program(program_code: str, task: Dict, train_ex=False) -> Tuple[float, List[Tuple[Any, Any, bool]]]:
     """
     Test a program against task training examples.
     
@@ -46,8 +47,8 @@ def test_program(program_code: str, task: Dict) -> Tuple[float, List[Tuple[Any, 
         solve_fn = namespace['solve']
         scores = []
         results = []
-        
-        for example in task['test']:
+        split="train" if train_ex else "test"
+        for example in task[split]:
             inp = example['input']
             expected = example['output']
             if isinstance(inp, list):
@@ -501,6 +502,7 @@ def process_directory(
         print (f"Evaluating on first {evaluate_on_n_pb} tasks\n", flush=True)
     results = []
     successful = 0
+    total_score_train = 0.0
     total_score = 0.0
     list_idx = []
     list_task_id = []
@@ -573,6 +575,7 @@ def process_directory(
                 error="Failed to extract code from response"
             )
         try:
+            score_train, _ = test_program(generated_code, task, train_ex=True)
             score, results = test_program(generated_code, task)
 
             success = score == 1.0
@@ -580,6 +583,7 @@ def process_directory(
                 task_id=task_id,
                 success=success,
                 score=score,
+                score_train=score_train,
                 program=generated_code,
                 phase1_output=phase1_output,
                 phase2_output=phase2_output
@@ -597,10 +601,11 @@ def process_directory(
         if result.success:
             successful += 1
         
+        total_score_train += result.score_train if result.score_train else 0.0
         total_score += result.score
-        
+        train_score = result.score_train if result.score_train else 0.0
         status = "✓" if result.success else "✗"
-        print(f"{status} [{i}/{len(json_files)}] {task_id}: {result.score:.2f}", flush=True)
+        print(f"{status} [{i}/{len(json_files)}] {task_id}: train_ex {train_score:.2f} test_ex {result.score:.2f}", flush=True)
     time5= time.time()
     print(f"Total time for executing code: {time5 - time4} seconds", flush=True)
 
@@ -616,6 +621,7 @@ def process_directory(
     print(f"{'='*80}", flush=True)
     print(f"Total tasks: {len(json_files)}", flush=True)
     print(f"Successful: {successful}/{len(json_files)} ({100*successful/len(json_files):.1f}%)", flush=True)
+    print(f"Average train score: {total_score_train/len(json_files):.2f}", flush=True)
     print(f"Average score: {total_score/len(json_files):.2f}", flush=True)
     print(f"{'='*80}\n", flush=True)
     
@@ -659,6 +665,7 @@ def process_directory_fs(
     results = []
     successful = 0
     total_score = 0.0
+    total_train_score = 0.0
     list_idx = []
     list_task_id = []
     list_task = []
@@ -708,6 +715,8 @@ def process_directory_fs(
                 error="Failed to extract code from response"
             )
         try:
+
+            score_train,results_train = test_program(generated_code, task,train_ex=True)
             score, results = test_program(generated_code, task)
 
             success = score == 1.0
@@ -715,6 +724,7 @@ def process_directory_fs(
                 task_id=task_id,
                 success=success,
                 score=score,
+                score_train=score_train,
                 program=generated_code,
                 phase1_output=phase1_output,
             )
@@ -731,9 +741,10 @@ def process_directory_fs(
             successful += 1
         
         total_score += result.score
-        
+        total_train_score += result.score_train if result.score_train else 0.0
+        train_score = result.score_train if result.score_train else 0.0
         status = "✓" if result.success else "✗"
-        print(f"{status} [{i}/{len(json_files)}] {task_id}: {result.score:.2f}", flush=True)
+        print(f"{status} [{i}/{len(json_files)}] {task_id}: train_ex: {train_score:.2f} test_ex: {result.score:.2f}", flush=True)
     time3 = time.time()
     print(f"Total time for executing code: {time3 - time2} seconds", flush=True)
 
@@ -747,6 +758,7 @@ def process_directory_fs(
     print(f"{'='*80}", flush=True)
     print(f"Total tasks: {len(json_files)}", flush=True)
     print(f"Successful: {successful}/{len(json_files)} ({100*successful/len(json_files):.1f}%)", flush=True)
+    print(f"Average train score: {total_train_score/len(json_files):.2f}", flush=True)
     print(f"Average score: {total_score/len(json_files):.2f}", flush=True)
     print(f"{'='*80}\n", flush=True)
     

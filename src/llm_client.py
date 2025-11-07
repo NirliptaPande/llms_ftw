@@ -126,7 +126,7 @@ class LLMArguments:
         },
     )
     gpu_memory: float = field(
-        default=0.9,
+        default=0.87,
         metadata={
             "help": "gpu memory to use for vllm server"
         },

@@ -40,7 +40,7 @@ parser.add_argument('--path_save', type=str, default='/home/flowers/work/llms_ft
 parser.add_argument('--mode', type=str, default='nir')
 parser.add_argument("--fp8", action=argparse.BooleanOptionalAction, help="fp8")
 parser.add_argument("--evaluate_on_n_pb", type=int, default=-1, help="Evaluate on N PB")
-
+parser.add_argument('--gpu_memory', type=float, default=0.89, help="GPU memory in GB")
 args = parser.parse_args()
 
 llm_args = LLMArguments()
@@ -98,3 +98,5 @@ else:
     raise ValueError(f"Unknown mode: {args.mode}")
 with open(args.path_save, 'wb') as f:
     pickle.dump(out, f)
+
+llm_client.terminate()

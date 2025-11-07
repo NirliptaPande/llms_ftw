@@ -1,9 +1,3 @@
-"""
-Main pipeline for ARC task solving using execution-based similarity.
-
-Pipeline: Program Similarity → Pattern Discovery → Code Generation
-"""
-
 import re
 import json
 from typing import Dict, List, Tuple, Optional, Any
@@ -11,20 +5,15 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import sys
-
-print("Script starting...", flush=True)
-sys.stdout.flush()
-# sys.path.append(str(Path(__file__).resolve().parent.parent))
-
+from src.llm_client import LLMArguments, LLMClient
+# print("Script starting...", flush=True)
+# sys.stdout.flush()
+from dotenv import load_dotenv
 from src.vlm_prompter import VLMPrompter
 from src.vlm_client import VLMConfig, create_client, BaseVLMClient
 from src.utils.library import ProgramLibrary, calculate_grid_similarity
 from src.utils.dsl import *
 from src.utils.constants import *
-# from utils.render_legacy import grid_to_base64_png_oai_content
-
-print("Imports done...", flush=True)
-sys.stdout.flush()
 
 @dataclass
 class TaskResult:
@@ -34,6 +23,7 @@ class TaskResult:
     score: float
     program: Optional[str] = None
     phase1_output: Optional[str] = None
+    phase2_output: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -57,7 +47,7 @@ def test_program(program_code: str, task: Dict) -> Tuple[float, List[Tuple[Any, 
         scores = []
         results = []
         
-        for example in task['train']:
+        for example in task['test']:
             inp = example['input']
             expected = example['output']
             if isinstance(inp, list):
@@ -80,20 +70,145 @@ def test_program(program_code: str, task: Dict) -> Tuple[float, List[Tuple[Any, 
 
 def extract_code_from_response(response: str) -> Optional[str]:
     """Extract Python code from LLM response."""
-    python_blocks = re.findall(r'```python\n(.*?)```', response, re.DOTALL)
-    
-    if python_blocks:
-        for block in python_blocks:
-            if 'def solve' in block:
-                return block.strip()
-        return python_blocks[0].strip()
-    
-    match = re.search(r'(def solve\(I\):.*?)(?=\n\ndef|\n\nif __name__|$)', response, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    
-    return None
+    try:
+        python_blocks = re.findall(r'```python\n(.*?)```', response, re.DOTALL)
+        
+        if python_blocks:
+            for block in python_blocks:
+                if 'def solve' in block:
+                    return block.strip()
+            return python_blocks[0].strip()
+        
+        match = re.search(r'(def solve\(I\):.*?)(?=\n\ndef|\n\nif __name__|$)', response, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        
+        return None
+    except Exception as e:
+        return None
 
+def get_similar_programs(library: ProgramLibrary,
+    task: Dict,
+    n_workers: int = None,
+    timeout: int = 2
+) -> List[Dict]:
+        
+    similar_programs = library.find_similar(
+        train_examples=task['train'],
+        top_k=5,
+        min_similarity=0.1,
+        n_workers=n_workers,
+        timeout=timeout
+    )
+    return similar_programs
+    
+def get_prompt_1(
+    task: Dict,
+    task_id: str,
+    prompter: VLMPrompter,
+    similar_programs: List[Dict] = None,
+    verbose: bool = True,
+    log_dir: str = "logs"
+) -> str:
+    
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    
+    if verbose:
+        print(f"\n{'='*80}", flush=True)
+        print(f"Solving Task: {task_id}", flush=True)
+        print(f"{'='*80}", flush=True)
+    
+    # ====================================================================
+    # STEP 1: Find Similar Programs by Execution (PARALLELIZED)
+    # ====================================================================
+    if verbose:
+        print("\n🔍 Finding similar programs by execution...", flush=True)
+    
+
+    if verbose:
+        if similar_programs:
+            print(f"   Found {len(similar_programs)} similar programs:", flush=True)
+            for i, prog in enumerate(similar_programs[:3], 1):
+                print(f"   {i}. Task {prog['task_id']}: {prog['similarity']:.2f}", flush=True)
+        else:
+            print("   No similar programs found", flush=True)
+    
+    # ====================================================================
+    # TEST LIBRARY PROGRAMS: Try existing solutions first
+    # ====================================================================
+    best_library_score = 0.0
+    best_library_program = None
+    
+    if similar_programs:
+        best_match = similar_programs[0]
+        best_library_score = best_match['similarity']
+        best_library_program = best_match['program']
+        if verbose:
+            print(f"\n✓ Best library match: Task {best_match['task_id']} ({best_library_score:.2f})", flush=True)
+        
+        if best_library_score == 1.0:
+            if verbose:
+                print(f"   → Perfect match found! Using library solution.", flush=True)
+            return TaskResult(
+                task_id=task_id,
+                success=True,
+                score=1.0,
+                program=best_library_program
+            )
+            
+    # ====================================================================
+    # PHASE 1: Pattern Discovery (Natural Language)
+    # ====================================================================
+    if verbose:
+        print("\n📝 Phase 1: Pattern Discovery...", flush=True)
+    
+    # Pass the raw similar_programs list - prompter will format it
+    phase1_prompt = prompter.build_phase1_prompt(task, similar_programs)
+    return phase1_prompt
+
+
+def get_prompt_2(
+    phase1_output: str,
+    similar_programs: List[Dict],
+    task: Dict,
+    task_id: str,
+    prompter: VLMPrompter,
+    verbose: bool = True,
+    log_dir: str = "logs",
+    
+) -> str:
+        
+    # LOG PHASE 1 OUTPUT
+    phase1_log_path = os.path.join(log_dir, f"{task_id}_phase1_output.txt")
+    with open(phase1_log_path, 'w', encoding='utf-8') as f:
+        f.write(f"Task ID: {task_id}\n")
+        f.write("="*80 + "\n")
+        f.write("PHASE 1: PATTERN DISCOVERY OUTPUT\n")
+        f.write("="*80 + "\n\n")
+        f.write(phase1_output)
+    
+    if verbose:
+        print(f"   ✓ Phase 1 complete ({len(phase1_output)} chars)", flush=True)
+        print(f"   📄 Logged to: {phase1_log_path}", flush=True)
+    
+    # ====================================================================
+    # PHASE 2: Code Generation
+    # ====================================================================
+    if verbose:
+        print("\n⚙️  Phase 2: Code Generation...", flush=True)
+    
+    # Pass the raw similar_programs list - prompter will format it
+    phase2_prompt = prompter.build_phase2_prompt(task, 
+        phase1_output,
+        similar_programs
+    )
+    return phase2_prompt   
+
+def get_prompt_str(phase_prompt):
+    prompt_str = ""
+    for i in phase_prompt:
+        prompt_str += i["text"]
+    return prompt_str
 
 def solve_task(
     task: Dict,
@@ -348,14 +463,13 @@ Combat this by evolving your hypothesis and actively seeking evidence against yo
 
 def process_directory(
     data_dir: str,
-    vlm_client_phase1: BaseVLMClient,
-    vlm_client_phase2: BaseVLMClient,
+    llm_client: LLMClient,
     prompter: VLMPrompter,
     library: ProgramLibrary,
     verbose: bool = True,
     n_workers: int = None,
     timeout: int = 2,
-    evaluate_on_n_pb: int = -1
+    evaluate_on_n_pb: int = -1,
 ) -> List[TaskResult]:
     """
     Process all task files in a directory.
@@ -368,7 +482,6 @@ def process_directory(
         verbose: Print progress
         n_workers: Number of parallel workers for library search (None = auto)
         timeout: Timeout per program execution in seconds
-        evaluate_on_n_pb: Number of programs to evaluate on (default: -1 = all)
     """
     data_path = Path(data_dir)
     
@@ -383,46 +496,108 @@ def process_directory(
         return []
     
     print(f"\nFound {len(json_files)} tasks in {data_dir}\n", flush=True)
-    
+    if evaluate_on_n_pb != -1:
+        json_files = json_files[:evaluate_on_n_pb]
+        print (f"Evaluating on first {evaluate_on_n_pb} tasks\n", flush=True)
     results = []
     successful = 0
     total_score = 0.0
+    list_idx = []
+    list_task_id = []
+    list_task = []
+    list_prompt_1 = []
     
+    list_similar_programs = []
     for i, task_file in enumerate(json_files, 1):
         task_id = task_file.stem
         
         try:
             with open(task_file, 'r') as f:
                 task = json.load(f)
-            
-            result = solve_task(
-                task=task,
-                task_id=task_id,
-                vlm_client_phase1=vlm_client_phase1,
-                vlm_client_phase2=vlm_client_phase2,
-                prompter=prompter,
-                library=library,
-                verbose=verbose,
+
+            similar_programs = get_similar_programs(
+                library,
+                task,
+                n_workers=n_workers,
+                timeout=timeout
+            )
+            list_similar_programs.append(similar_programs)
+            list_idx.append(i)
+            list_task_id.append(task_id)
+            list_task.append(task)
+
+            list_prompt_1.append(get_prompt_str(get_prompt_1(
+                task,
+                task_id,
+                prompter,
                 n_workers=n_workers,
                 timeout=timeout,
-                log_dir="logs_images"#TODO change log dir
-            )
-            
-            results.append(result)
-            
-            if result.success:
-                successful += 1
-            
-            total_score += result.score
-            
-            status = "✓" if result.success else "✗"
-            print(f"{status} [{i}/{len(json_files)}] {task_id}: {result.score:.2f}", flush=True)
+                verbose=verbose
+            )))
             
         except json.JSONDecodeError as e:
             print(f"✗ [{i}/{len(json_files)}] {task_id}: Invalid JSON - {e}", flush=True)
         except Exception as e:
             print(f"✗ [{i}/{len(json_files)}] {task_id}: {e}", flush=True)
     
+
+    out_1 = llm_client.generate(list_prompt_1)
+    out_1 = [resp[0] for resp in out_1]
+    list_prompt_2 = []
+    for i, task_id, task, phase1_output, similar_programs in zip(list_idx, list_task_id, list_task, out_1, list_similar_programs):
+        phase2_prompt = get_prompt_str(get_prompt_2(
+            phase1_output,
+            similar_programs,
+            task,
+            task_id,
+            prompter,
+            verbose=verbose
+        ))
+        list_prompt_2.append(phase2_prompt)
+
+    out_2 = llm_client.generate(list_prompt_2)
+    out_2 = [resp[0] for resp in out_2]
+    list_generated_code = [extract_code_from_response(resp) for resp in out_2]
+    for task_id, task, generated_code, phase1_output, phase2_output in zip(list_task_id, list_task, list_generated_code, out_1, out_2):
+        if not generated_code:
+            return TaskResult(
+                task_id=task_id,
+                success=False,
+                score=0.0,
+                phase1_output=phase1_output,
+                phase2_output=phase2_output,
+                error="Failed to extract code from response"
+            )
+        try:
+            score, results = test_program(generated_code, task)
+
+            success = score == 1.0
+            result = TaskResult(
+                task_id=task_id,
+                success=success,
+                score=score,
+                program=generated_code,
+                phase1_output=phase1_output,
+                phase2_output=phase2_output
+            )
+        except Exception as e:
+            result = TaskResult(
+                task_id=task_id,
+                success=False,
+                score=0.0,
+                phase1_output=phase1_output,
+                phase2_output=phase2_output,
+                error=str(e)
+            )
+        results.append(result)
+        if result.success:
+            successful += 1
+        
+        total_score += result.score
+        
+        status = "✓" if result.success else "✗"
+        print(f"{status} [{i}/{len(json_files)}] {task_id}: {result.score:.2f}", flush=True)
+
     # Summary
     print(f"\n{'='*80}", flush=True)
     print(f"SUMMARY", flush=True)
@@ -468,70 +643,3 @@ def save_results(results: List[TaskResult], output_dir: str = 'results') -> None
     print(f"Saved summary to {csv_file}", flush=True)
 
 
-def main():
-    from dotenv import load_dotenv
-    """Main entry point"""
-    # print("Initializing components...", flush=True)
-    load_dotenv()
-    PROVIDER = "grok"
-    if PROVIDER == "grok":
-        api_key = os.getenv('GROK_API_KEY')
-        api_base = "https://api.x.ai/v1"
-        model = "grok-4-fast"
-    elif PROVIDER == "qwen":
-        api_key = None
-        api_base = "http://localhost:8000/v1"
-        model = "Qwen/Qwen2.5-7B-Instruct"
-    elif PROVIDER == "gemini":
-        api_key = os.getenv('GEMINI_API_KEY')
-        api_base = "https://generativelanguage.googleapis.com/v1beta/models/"
-        model = "gemini-2.5-pro"
-        
-    vlm_config_phase1 = VLMConfig(
-        api_key=api_key,
-        model=model,
-        api_base=api_base,
-        max_tokens=16384,  # Longer for analysis
-        save_prompts=False,
-        prompt_log_dir="prompts_testing"
-    )
-    vlm_config_phase2 = VLMConfig(
-        api_key=api_key,
-        model=model,
-        api_base=api_base,
-        max_tokens=8192   # Shorter for code gen
-    )
-    
-    vlm_client_phase1 = create_client(PROVIDER, config=vlm_config_phase1)
-    # print("VLM client created", flush=True)
-    
-    vlm_client_phase2 = create_client(PROVIDER, config=vlm_config_phase2)
-    prompter = VLMPrompter()
-    # print("Prompter created", flush=True)
-    
-    library = ProgramLibrary()  # Auto-loads from solvers.py
-    # print("Loaded library...", flush=True)
-    #sanity check
-    print(f"Loaded {len(library)} programs from library", flush=True)
-    if len(library) > 0:
-        print(f"First program: {library.programs[0]['task_id']}", flush=True)
-    
-    # Configure parallelization
-    results = process_directory(
-        data_dir='data_v1/eval_size_10',
-        vlm_client_phase1=vlm_client_phase1,
-        vlm_client_phase2=vlm_client_phase2,
-        prompter=prompter,
-        library=library,
-        verbose=True,
-        n_workers=None,  # Auto-detect CPUs (recommended)
-        timeout=2        # 2 second timeout per program
-    )
-    
-    save_results(results, output_dir='results/images')#TODO change output dir
-
-
-if __name__ == "__main__":
-    # print("Starting main...", flush=True)
-    sys.stdout.flush()
-    main()

@@ -41,7 +41,8 @@ class VLMPrompter:
         
         # Format training examples (with images)
         content_blocks.extend(self._format_training_examples(task['train']))
-        
+        content_blocks.extend(self._format_test_examples(task['test']))
+
         # Add similar programs section
         content_blocks.append({
             "type": "text",
@@ -169,7 +170,8 @@ class VLMPrompter:
         content_blocks = []
         content_blocks.append({
             "type": "text",
-            "text": f"Below are {len(train_examples)} training examples:\n for each example, the input grid is shown first, followed by the output grid.\n."
+            "text": f"Below are {len(train_examples)} training examples follwed by the test example(s) you have to generalize to, for each example, the input grid is shown first, followed by the output grid. \n"
+
         })
         for idx, example in enumerate(train_examples, 1):
             # Example header
@@ -213,6 +215,55 @@ class VLMPrompter:
             })
     
         return content_blocks   
+    
+    def _format_test_examples(self, test_examples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Format test examples as content blocks with images (input only, no output)"""
+        include_images = self.use_vision
+        content_blocks = []
+        
+        # Header
+        content_blocks.append({
+            "type": "text",
+            "text": f"\n{'='*60}\nTEST EXAMPLES (to solve)\n{'='*60}\n"
+        })
+        
+        content_blocks.append({
+            "type": "text",
+            "text": f"Below are {len(test_examples)} test example(s) you need to solve:\nFor each test example, only the input grid is provided. You must determine the output.\n"
+        })
+        
+        for idx, example in enumerate(test_examples, 1):
+            # Test example header
+            content_blocks.append({
+                "type": "text",
+                "text": f"\nTest Example {idx}:\n"
+            })
+            
+            # Input section
+            content_blocks.append({
+                "type": "text",
+                "text": "Input:\n"
+            })
+            
+            # Input image - conditional
+            if include_images:
+                input_grid = np.array(example['input'])
+                content_blocks.append(grid_to_base64_png_oai_content(input_grid))
+            
+            # Input ASCII
+            content_blocks.append({
+                "type": "text",
+                "text": f"\nASCII representation:\n{self._format_grid(example['input'], separator='|')}\n"
+            })
+            
+            # Placeholder for output
+            content_blocks.append({
+                "type": "text",
+                "text": "\nOutput: [TO BE DETERMINED]\n"
+            })
+        
+        return content_blocks
+
     def _format_grid(self, grid: Tuple[Tuple[int]], separator: str = "|") -> str:
         return "\n".join(separator.join(str(cell) for cell in row) for row in grid)
     
@@ -238,10 +289,10 @@ class VLMPrompter:
         return r"""
 ## Analysis Protocol
 
-You will analyze these examples systematically, allowing your hypothesis to evolve 
+You will analyze these examples and the test sample systematically, allowing your hypothesis to evolve 
 naturally as you see more data - like a human solving a puzzle.
 
-**Core principle:** Look for DIFFERENCES within each example (input→output changes) 
+**Core principle:** Look for DIFFERENCES within each example (input→output changes)
 and SIMILARITIES across all examples (the consistent pattern).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -253,10 +304,11 @@ Given: Input 1 → Output 1
 
 <observation_1>
 Describe what you see:
-
-    What's the size/shape change?
-
-What colors changed?What geometric transformations occurred?What patterns do you notice?</observation_1>
+- What's the size/shape change?
+- What colors changed? 
+- What geometric transformations occurred?
+- What patterns do you notice?
+</observation_1>
 
 <hypothesis_1>
 State your initial guess about the transformation rule in natural language.
@@ -267,27 +319,25 @@ Step 1.2: Second Example Validation
 Given: Input 2 → Output 2
 
 <observation_2>
-
-    Does your hypothesis from Example 1 still hold?
-
-What's similar to Example 1?What's different from Example 1?</observation_2>
+- Does your hypothesis from Example 1 still hold?
+- What's similar to Example 1? 
+- What's different from Example 1?
+</observation_2>
 
 <hypothesis_2>
 Refine your hypothesis:
-
-    If it still works: Confirm and strengthen
-
-If it breaks: Revise with a more general patternExample: "Actually, it's mirrored horizontally, THEN the original is stacked on top"
+- If it still works: Confirm and strengthen
+- If it breaks: Revise with a more general pattern
+Example: "Actually, it's mirrored horizontally, THEN the original is stacked on top"
 </hypothesis_2>
 
 Step 1.3: Third Example Confirmation
 Given: Input 3 → Output 3
 
 <observation_3>
-
-    Does hypothesis_2 work here?
-
-Any new edge cases or variations?</observation_3>
+- Does hypothesis_2 work here?
+- Any new edge cases or variations?
+</observation_3>
 
 <hypothesis_3>
 Final refined hypothesis in natural language.
@@ -296,22 +346,32 @@ Final refined hypothesis in natural language.
 Step 1.N: Additional Examples
 Continue for all remaining examples...
 
-Step 1.Final: Pattern Synthesis
+Step 2.1: First Test Example Confirmation
+Given: Test Input 1
+<observation_test1>
+- Does hypothesis_training work here?
+- Any new edge cases or variations?
+</observation_test1>
+
+<hypothesis_test1>
+Test hypothesis after seeing test example 1.
+</hypothesis_test1>
+
+Step 2.N: Additional Test Examples, if present
+Continue for all remaining test cases...
+
+Step 2.Final: Pattern Synthesis
 <pattern_summary>
 In plain English, the transformation rule is:
+- [First operation in natural language]
+- [Second operation in natural language]
+- [Any conditions or special cases]
 
-    [First operation in natural language]
-
-[Second operation in natural language][Any conditions or special cases]
 Edge cases to consider:
-
-    [Any variations you noticed]
-
+- [Any variations you noticed]
 
 Why this works:
-
-    [Your reasoning about WHY this pattern makes sense]
-
+- [Brief explanation about WHY this pattern makes sense]
 </pattern_summary>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -546,5 +606,4 @@ def solve(I):
     return O  # O is the output grid
 ```
 
-Generate the solve function now:
 """

@@ -12,8 +12,8 @@ from pathlib import Path
 import os
 import sys
 
-print("Script starting...", flush=True)
-sys.stdout.flush()
+# print("Script starting...", flush=True)
+# sys.stdout.flush()
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from vlm_prompter import VLMPrompter
@@ -21,10 +21,22 @@ from vlm_client import VLMConfig, create_client, BaseVLMClient
 from utils.library import ProgramLibrary, calculate_grid_similarity
 from utils.dsl import *
 from utils.constants import *
-# from utils.render_legacy import grid_to_base64_png_oai_content
+import threading
 
-print("Imports done...", flush=True)
-sys.stdout.flush()
+# print("Imports done...", flush=True)
+# sys.stdout.flush()
+
+class ThreadSafeVLMClient:
+    """VLM client wrapper for parallel API calls"""
+    def __init__(self, client):
+        self.client = client
+    
+    def query(self, prompt, system_prompt=None):
+        # No lock - Grok handles concurrent requests
+        return self.client.query(prompt, system_prompt)
+    
+    def __getattr__(self, name):
+        return getattr(self.client, name)
 
 @dataclass
 class TaskResult:
@@ -57,7 +69,7 @@ def test_program(program_code: str, task: Dict) -> Tuple[float, List[Tuple[Any, 
         scores = []
         results = []
         
-        for example in task['train']:
+        for example in task['test']:
             inp = example['input']
             expected = example['output']
             if isinstance(inp, list):
@@ -354,20 +366,13 @@ def process_directory(
     library: ProgramLibrary,
     verbose: bool = True,
     n_workers: int = None,
-    timeout: int = 2
+    timeout: int = 2,
+    max_parallel_tasks: int = None  # None = all tasks in parallel
 ) -> List[TaskResult]:
-    """
-    Process all task files in a directory.
+    """Process all task files in a directory with parallelization."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
     
-    Args:
-        data_dir: Directory containing task JSON files
-        vlm_client: VLM client for queries
-        prompter: Prompt builder
-        library: Program library
-        verbose: Print progress
-        n_workers: Number of parallel workers for library search (None = auto)
-        timeout: Timeout per program execution in seconds
-    """
     data_path = Path(data_dir)
     
     if not data_path.exists():
@@ -380,13 +385,22 @@ def process_directory(
         print(f"No JSON files found in {data_dir}", flush=True)
         return []
     
-    print(f"\nFound {len(json_files)} tasks in {data_dir}\n", flush=True)
+    # Default to processing all tasks in parallel
+    if max_parallel_tasks is None:
+        max_parallel_tasks = len(json_files)
+    
+    print(f"\nFound {len(json_files)} tasks in {data_dir}", flush=True)
+    print(f"Processing with {min(max_parallel_tasks, len(json_files))} parallel workers\n", flush=True)
     
     results = []
+    results_lock = threading.Lock()
     successful = 0
     total_score = 0.0
     
-    for i, task_file in enumerate(json_files, 1):
+    def process_single_task(task_file, idx):
+        """Process a single task"""
+        nonlocal successful, total_score
+        
         task_id = task_file.stem
         
         try:
@@ -400,38 +414,52 @@ def process_directory(
                 vlm_client_phase2=vlm_client_phase2,
                 prompter=prompter,
                 library=library,
-                verbose=verbose,
+                verbose=True,  # Disable verbose to avoid interleaved output
                 n_workers=n_workers,
                 timeout=timeout,
-                log_dir="logs_images"#TODO change log dir
+                log_dir="logs_test_1"
             )
             
-            results.append(result)
+            # Thread-safe result collection
+            with results_lock:
+                results.append(result)
+                if result.success:
+                    successful += 1
+                total_score += result.score
+                
+                # status = "✓" if result.success else "✗"
+                # print(f"{status} [{len(results)}/{len(json_files)}] {task_id}: {result.score:.2f}", flush=True)
             
-            if result.success:
-                successful += 1
-            
-            total_score += result.score
-            
-            status = "✓" if result.success else "✗"
-            print(f"{status} [{i}/{len(json_files)}] {task_id}: {result.score:.2f}", flush=True)
+            return result
             
         except json.JSONDecodeError as e:
-            print(f"✗ [{i}/{len(json_files)}] {task_id}: Invalid JSON - {e}", flush=True)
+            print(f"✗ [{idx}/{len(json_files)}] {task_id}: Invalid JSON - {e}", flush=True)
+            return None
         except Exception as e:
-            print(f"✗ [{i}/{len(json_files)}] {task_id}: {e}", flush=True)
+            print(f"✗ [{idx}/{len(json_files)}] {task_id}: {e}", flush=True)
+            return None
+    
+    # Process all tasks in parallel
+    with ThreadPoolExecutor(max_workers=max_parallel_tasks) as executor:
+        futures = {
+            executor.submit(process_single_task, task_file, i): task_file
+            for i, task_file in enumerate(json_files, 1)
+        }
+        
+        # Wait for all to complete
+        for future in as_completed(futures):
+            future.result()  # Raises exception if task failed
     
     # Summary
-    print(f"\n{'='*80}", flush=True)
-    print(f"SUMMARY", flush=True)
-    print(f"{'='*80}", flush=True)
-    print(f"Total tasks: {len(json_files)}", flush=True)
-    print(f"Successful: {successful}/{len(json_files)} ({100*successful/len(json_files):.1f}%)", flush=True)
-    print(f"Average score: {total_score/len(json_files):.2f}", flush=True)
-    print(f"{'='*80}\n", flush=True)
+    # print(f"\n{'='*80}", flush=True)
+    # print(f"SUMMARY", flush=True)
+    # print(f"{'='*80}", flush=True)
+    # print(f"Total tasks: {len(json_files)}", flush=True)
+    # print(f"Successful: {successful}/{len(json_files)} ({100*successful/len(json_files):.1f}%)", flush=True)
+    # print(f"Average score: {total_score/len(json_files):.2f}", flush=True)
+    # print(f"{'='*80}\n", flush=True)
     
     return results
-
 
 def save_results(results: List[TaskResult], output_dir: str = 'results') -> None:
     """Save results to JSON and CSV files."""
@@ -500,19 +528,21 @@ def main():
         max_tokens=8192   # Shorter for code gen
     )
     
-    vlm_client_phase1 = create_client(PROVIDER, config=vlm_config_phase1)
+    base_client_phase1 = create_client(PROVIDER, config=vlm_config_phase1)
     # print("VLM client created", flush=True)
     
-    vlm_client_phase2 = create_client(PROVIDER, config=vlm_config_phase2)
+    base_client_phase2 = create_client(PROVIDER, config=vlm_config_phase2)
+    vlm_client_phase1 = ThreadSafeVLMClient(base_client_phase1)
+    vlm_client_phase2 = ThreadSafeVLMClient(base_client_phase2)
     prompter = VLMPrompter()
     # print("Prompter created", flush=True)
     
     library = ProgramLibrary()  # Auto-loads from solvers.py
     # print("Loaded library...", flush=True)
     #sanity check
-    print(f"Loaded {len(library)} programs from library", flush=True)
-    if len(library) > 0:
-        print(f"First program: {library.programs[0]['task_id']}", flush=True)
+    # print(f"Loaded {len(library)} programs from library", flush=True)
+    # if len(library) > 0:
+    #     print(f"First program: {library.programs[0]['task_id']}", flush=True)
     
     # Configure parallelization
     results = process_directory(
@@ -521,12 +551,13 @@ def main():
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,
         library=library,
-        verbose=True,
-        n_workers=None,  # Auto-detect CPUs (recommended)
-        timeout=2        # 2 second timeout per program
+        verbose=False,           # Changed from True
+        n_workers=4,             # Can be 1-8, doesn't matter much
+        timeout=2,
+        max_parallel_tasks=8     # ADD THIS - controls parallel API calls
     )
     
-    save_results(results, output_dir='results/images')#TODO change output dir
+    save_results(results, output_dir='results/test_1')#TODO change output dir
 
 
 if __name__ == "__main__":

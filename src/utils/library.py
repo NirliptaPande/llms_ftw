@@ -356,7 +356,7 @@ class ProgramLibrary:
         start_time = time.time()
         
         # Use ProcessPoolExecutor for true parallelism
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
             # Create partial function with fixed arguments
             eval_func = partial(
                 evaluate_single_program,

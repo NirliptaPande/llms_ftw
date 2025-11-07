@@ -39,6 +39,7 @@ parser.add_argument('--reasoning_effort', type=str, default="low")
 parser.add_argument('--path_save', type=str, default='/home/flowers/work/llms_ftw/save_data/test.pkl')
 parser.add_argument('--mode', type=str, default='nir')
 parser.add_argument("--fp8", action=argparse.BooleanOptionalAction, help="fp8")
+parser.add_argument("--evaluate_on_n_pb", type=int, default=-1, help="Evaluate on N PB")
 
 args = parser.parse_args()
 
@@ -85,12 +86,14 @@ if args.mode == 'fs':
     out = process_directory_fs(args.data_dir,
                      llm_client,
                      prompter,
+                     evaluate_on_n_pb = args.evaluate_on_n_pb
                      )
 elif args.mode == 'nir':
     out = process_directory(args.data_dir,
                             llm_client,
                             prompter,
-                            library)
+                            library,
+                            evaluate_on_n_pb = args.evaluate_on_n_pb)
 else:
     raise ValueError(f"Unknown mode: {args.mode}")
 with open(args.path_save, 'wb') as f:

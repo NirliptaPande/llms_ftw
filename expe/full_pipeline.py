@@ -23,7 +23,7 @@ from src.utils.constants import *
 import argparse
 from dotenv import load_dotenv
 import pickle
-from src.main_utils import process_directory
+from src.main_utils import process_directory, process_directory_fs
 # from utils.render_legacy import grid_to_base64_png_oai_content
 parser = argparse.ArgumentParser()
 parser.add_argument('--expe_name', type=str, default='test')
@@ -36,6 +36,7 @@ parser.add_argument('--gpu', type=int, default=1)
 parser.add_argument('--reasoning_effort', type=str, default="low")
 parser.add_argument('--path_save', type=str, default='/home/flowers/work/llms_ftw/save_data/test.pkl')
 parser.add_argument('--mode', type=str, default='nir')
+parser.add_argument("--fp8", action=argparse.BooleanOptionalAction, help="fp8")
 
 args = parser.parse_args()
 
@@ -46,6 +47,7 @@ llm_args.top_p = args.top_p
 llm_args.model_name_or_path = args.model_name_or_path
 llm_args.gpu = args.gpu
 llm_args.reasoning_effort = args.reasoning_effort  
+llm_args.fp8 = args.fp8
 llm_client = LLMClient(llm_args)
 
 
@@ -76,11 +78,17 @@ prompter = VLMPrompter(use_vision=False)
 
 library = ProgramLibrary()  # Auto-loads from solvers.py
 
-
-out = process_directory(args.data_dir,
-                  llm_client,
-                  prompter,
-                  library)
-
+if args.mode == 'fs':
+    out = process_directory_fs(args.data_dir,
+                     llm_client,
+                     prompter,
+                     )
+elif args.mode == 'nir':
+    out = process_directory(args.data_dir,
+                            llm_client,
+                            prompter,
+                            library)
+else:
+    raise ValueError(f"Unknown mode: {args.mode}")
 with open(args.path_save, 'wb') as f:
     pickle.dump(out, f)

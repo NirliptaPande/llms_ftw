@@ -14,7 +14,7 @@ from src.vlm_client import VLMConfig, create_client, BaseVLMClient
 from src.utils.library import ProgramLibrary, calculate_grid_similarity
 from src.utils.dsl import *
 from src.utils.constants import *
-
+import time
 @dataclass
 class TaskResult:
     """Result of attempting to solve a task"""
@@ -540,8 +540,10 @@ def process_directory(
         except Exception as e:
             print(f"✗ [{i}/{len(json_files)}] {task_id}: {e}", flush=True)
     
-
+    time1= time.time()
     out_1 = llm_client.generate(list_prompt_1)
+    time2= time.time()
+    print(f"Time for phase 1: {time2 - time1} seconds", flush=True)
     out_1 = [resp[0] for resp in out_1]
     list_prompt_2 = []
     for i, task_id, task, phase1_output, similar_programs in zip(list_idx, list_task_id, list_task, out_1, list_similar_programs):
@@ -554,10 +556,13 @@ def process_directory(
             verbose=verbose
         ))
         list_prompt_2.append(phase2_prompt)
-
+    time3= time.time()
     out_2 = llm_client.generate(list_prompt_2)
     out_2 = [resp[0] for resp in out_2]
+    time4= time.time()
+    print(f"Time for phase 2: {time4 - time3} seconds", flush=True)
     list_generated_code = [extract_code_from_response(resp) for resp in out_2]
+
     for task_id, task, generated_code, phase1_output, phase2_output in zip(list_task_id, list_task, list_generated_code, out_1, out_2):
         if not generated_code:
             return TaskResult(
@@ -597,7 +602,15 @@ def process_directory(
         
         status = "✓" if result.success else "✗"
         print(f"{status} [{i}/{len(json_files)}] {task_id}: {result.score:.2f}", flush=True)
+    time5= time.time()
+    print(f"Total time for executing code: {time5 - time4} seconds", flush=True)
 
+    # recap time 
+    print(f"Time breakdown:", flush=True)
+    print(f"  Phase 1 generation time: {time2 - time1} seconds", flush=True)
+    print(f"  Phase 2 generation time: {time4 - time3} seconds", flush=True)
+    print(f"  Total time for executing code: {time5 - time4} seconds", flush=True)
+    print(f"  Total solving time: {time5 - time1} seconds", flush=True)
     # Summary
     print(f"\n{'='*80}", flush=True)
     print(f"SUMMARY", flush=True)
@@ -609,6 +622,136 @@ def process_directory(
     
     return results
 
+
+def process_directory_fs(
+    data_dir: str,
+    llm_client: LLMClient,
+    prompter: VLMPrompter,
+    evaluate_on_n_pb: int = -1,
+) -> List[TaskResult]:
+    """
+    Process all task files in a directory.
+    
+    Args:
+        data_dir: Directory containing task JSON files
+        vlm_client: VLM client for queries
+        prompter: Prompt builder
+        library: Program library
+        verbose: Print progress
+        n_workers: Number of parallel workers for library search (None = auto)
+        timeout: Timeout per program execution in seconds
+    """
+    data_path = Path(data_dir)
+    
+    if not data_path.exists():
+        print(f"Error: Directory not found: {data_dir}", flush=True)
+        return []
+    
+    json_files = sorted(data_path.glob('*.json'))
+    
+    if not json_files:
+        print(f"No JSON files found in {data_dir}", flush=True)
+        return []
+    
+    print(f"\nFound {len(json_files)} tasks in {data_dir}\n", flush=True)
+    if evaluate_on_n_pb != -1:
+        json_files = json_files[:evaluate_on_n_pb]
+        print (f"Evaluating on first {evaluate_on_n_pb} tasks\n", flush=True)
+    results = []
+    successful = 0
+    total_score = 0.0
+    list_idx = []
+    list_task_id = []
+    list_task = []
+    list_prompt_1 = []
+    
+    list_similar_programs = []
+    for i, task_file in enumerate(json_files, 1):
+        task_id = task_file.stem
+        
+        try:
+            with open(task_file, 'r') as f:
+                task = json.load(f)
+
+            # similar_programs = get_similar_programs(
+            #     library,
+            #     task,
+            #     n_workers=n_workers,
+            #     timeout=timeout
+            # )
+            similar_programs = None
+            list_similar_programs.append(similar_programs)
+            list_idx.append(i)
+            list_task_id.append(task_id)
+            list_task.append(task)
+
+            list_prompt_1.append(get_prompt_fs(prompter,
+                task))
+            
+        except json.JSONDecodeError as e:
+            print(f"✗ [{i}/{len(json_files)}] {task_id}: Invalid JSON - {e}", flush=True)
+        except Exception as e:
+            print(f"✗ [{i}/{len(json_files)}] {task_id}: {e}", flush=True)
+    
+    time1= time.time()
+    out_1 = llm_client.generate(list_prompt_1)
+    out_1 = [resp[0] for resp in out_1]
+    time2= time.time()
+    print(f"Time for phase 1: {time2 - time1} seconds", flush=True)
+    list_generated_code = [extract_code_from_response(resp) for resp in out_1]
+    for task_id, task, generated_code, phase1_output in zip(list_task_id, list_task, list_generated_code, out_1):
+        if not generated_code:
+            return TaskResult(
+                task_id=task_id,
+                success=False,
+                score=0.0,
+                phase1_output=phase1_output,
+                error="Failed to extract code from response"
+            )
+        try:
+            score, results = test_program(generated_code, task)
+
+            success = score == 1.0
+            result = TaskResult(
+                task_id=task_id,
+                success=success,
+                score=score,
+                program=generated_code,
+                phase1_output=phase1_output,
+            )
+        except Exception as e:
+            result = TaskResult(
+                task_id=task_id,
+                success=False,
+                score=0.0,
+                phase1_output=phase1_output,
+                error=str(e)
+            )
+        results.append(result)
+        if result.success:
+            successful += 1
+        
+        total_score += result.score
+        
+        status = "✓" if result.success else "✗"
+        print(f"{status} [{i}/{len(json_files)}] {task_id}: {result.score:.2f}", flush=True)
+    time3 = time.time()
+    print(f"Total time for executing code: {time3 - time2} seconds", flush=True)
+
+    print(f"Time breakdown:", flush=True)
+    print(f"  Phase 1 generation time: {time2 - time1} seconds", flush=True)
+    print(f"  Total time for executing code: {time3 - time2} seconds", flush=True)
+    print(f"  Total solving time: {time3 - time1} seconds", flush=True)
+    # Summary
+    print(f"\n{'='*80}", flush=True)
+    print(f"SUMMARY", flush=True)
+    print(f"{'='*80}", flush=True)
+    print(f"Total tasks: {len(json_files)}", flush=True)
+    print(f"Successful: {successful}/{len(json_files)} ({100*successful/len(json_files):.1f}%)", flush=True)
+    print(f"Average score: {total_score/len(json_files):.2f}", flush=True)
+    print(f"{'='*80}\n", flush=True)
+    
+    return results
 
 def save_results(results: List[TaskResult], output_dir: str = 'results') -> None:
     """Save results to JSON and CSV files."""
@@ -643,3 +786,379 @@ def save_results(results: List[TaskResult], output_dir: str = 'results') -> None
     print(f"Saved summary to {csv_file}", flush=True)
 
 
+
+
+def get_prompt_fs(prompter, task):
+
+    prompt_dsl = prompter._get_phase2_dsl_section()
+    prompt_task = get_prompt_str(prompter._format_training_examples(task['train']))
+    prompt_task += get_prompt_str(prompter._format_test_examples(task['test']))
+    prompt = f"""You are an expert at solving ARC puzzles using program synthesis given a DSL.
+    Your goal is given a task, generate a Python `solve(I)` function using ONLY the DSL primitives below.\n\n
+    {prompt_dsl}
+
+    Here are some examples of ARC tasks and their corresponding `solve(I)` functions:
+
+    """
+    
+    fs_ex = f"""
+---------------------------
+# Task 1:
+
+Below are 2 training examples follwed by the test example(s) you have to generalize to, for each example, the input grid is shown first, followed by the output grid. 
+
+Example 1:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0
+1|0|0|0|0|0|0|0|0|0|2
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+
+Output:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0
+1|1|1|1|1|5|2|2|2|2|2
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+
+Example 2:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+3|0|0|0|0|0|0|0|0|0|7
+0|0|0|0|0|0|0|0|0|0|0
+
+Output:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+3|3|3|3|3|5|7|7|7|7|7
+0|0|0|0|0|0|0|0|0|0|0
+
+
+============================================================
+TEST EXAMPLES (to solve)
+============================================================
+Below are 1 test example(s) you need to solve:
+For each test example, only the input grid is provided. You must determine the output.
+
+Test Example 1:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0
+4|0|0|0|0|0|0|0|0|0|8
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+6|0|0|0|0|0|0|0|0|0|9
+
+Output: [TO BE DETERMINED]
+
+Solution:
+```python
+def solve(I):
+    x1 = left_half(I)
+    x2 = right_half(I)
+    x3 = as_objects(x2, True, False, True)
+    x4 = as_objects(x1, True, False, True)
+    x5 = compose(horizontal_line, center)
+    x6 = combine_two_function_results(recolor, get_color, x5)
+    x7 = transform_and_flatten(x6, x4)
+    x8 = paint_onto_grid(x1, x7)
+    x9 = transform_and_flatten(x6, x3)
+    x10 = paint_onto_grid(I, x9)
+    x11 = as_objects(x8, True, False, True)
+    x12 = transform(upper_right_corner, x11)
+    x13 = shift_by_vector(x12, RIGHT)
+    x14 = flatten(x11)
+    x15 = paint_onto_grid(x10, x14)
+    O = fill(x15, COLOR_FIVE, x13)
+    return O
+```
+
+---------------------------
+# Task 2:
+
+Below are 3 training examples follwed by the test example(s) you have to generalize to, for each example, the input grid is shown first, followed by the output grid. 
+
+Example 1:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|0|1|0|0|1|1|0|1|0|0
+0|0|1|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|1|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|0|0|1|1|0|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Output:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|2|1|2|2|1|1|2|1|0|0
+0|0|1|0|0|0|0|0|0|0|2|0|0
+0|0|2|0|0|0|0|0|0|0|1|0|0
+0|0|2|0|0|0|0|0|0|0|2|0|0
+0|0|2|0|0|0|0|0|0|0|1|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|2|2|1|1|2|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Example 2:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|1|1|0|0|1|1|0|0|0|0
+0|0|1|0|0|0|0|0|1|0|0|0|0
+0|0|0|0|1|0|0|0|0|0|0|0|0
+0|0|1|0|1|0|0|0|1|0|0|0|0
+0|0|1|0|0|0|0|0|1|0|0|0|0
+0|0|0|0|1|0|0|0|1|0|0|0|0
+0|0|1|1|1|1|0|1|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Output:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|1|1|2|2|1|1|0|0|0|0
+0|0|1|0|2|0|0|0|1|0|0|0|0
+0|0|2|0|1|0|0|0|2|0|0|0|0
+0|0|1|0|1|0|0|0|1|0|0|0|0
+0|0|1|0|2|0|0|0|1|0|0|0|0
+0|0|2|0|1|0|0|0|1|0|0|0|0
+0|0|1|1|1|1|2|1|2|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Example 3:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|1|0|1|1|0|1|1|1|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|0|1|0|1|1|0|0|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|0|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|0|1|1|0|0|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Output:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|1|2|1|1|2|1|1|1|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|2|0|0|0|0|0|0|0|2|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|2|1|2|1|1|2|2|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|2|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|2|1|1|2|2|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+
+============================================================
+TEST EXAMPLES (to solve)
+============================================================
+Below are 1 test example(s) you need to solve:
+For each test example, only the input grid is provided. You must determine the output.
+
+Test Example 1:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|0|1|1|0|1|0|1|1|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|0|1|0|1|0|0|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|0|1|1|0|1|0|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Output: [TO BE DETERMINED]
+
+Solution:
+```python
+def solve(I):
+    x1 = of_color(I, COLOR_ONE)
+    x2 = box(x1)
+    x3 = fill(I, COLOR_TWO, x2)
+    x4 = smallest_subgrid_containing(x1, x3)
+    x5 = of_color(x4, COLOR_ONE)
+    x6 = transform_and_flatten(vertical_line, x5)
+    x7 = transform_and_flatten(horizontal_line, x5)
+    x8 = size(x6)
+    x9 = size(x7)
+    x10 = greater_than(x8, x9)
+    x11 = condition_if_else(x10, x7, x6)
+    x12 = fill(x4, COLOR_TWO, x11)
+    x13 = of_color(x12, COLOR_TWO)
+    x14 = upper_left_corner(x1)
+    x15 = shift_by_vector(x13, x14)
+    O = fill_background(I, COLOR_TWO, x15)
+    return O
+```
+
+---------------------------
+# Task 3:
+
+Below are 2 training examples follwed by the test example(s) you have to generalize to:
+ for each example, the input grid is shown first, followed by the output grid. 
+.
+Example 1:
+Input:
+
+ASCII representation:
+8|0|0|0|0|0|8|8|8|8|8|8|0|8|8|8|0|8|8|0|8|8|8|0
+0|0|8|8|8|0|0|0|0|0|0|8|0|0|0|8|0|8|0|0|8|0|8|0
+8|8|8|0|8|0|8|8|8|8|0|8|8|8|0|8|0|8|8|8|8|0|8|0
+8|0|0|0|8|0|8|0|0|8|0|0|0|8|0|8|0|0|0|0|0|0|8|0
+8|0|8|8|8|0|8|8|0|8|0|8|8|8|0|8|8|0|8|8|8|8|8|0
+8|0|8|0|0|0|0|8|0|8|0|8|0|0|0|0|8|0|8|0|0|0|0|0
+8|0|8|8|8|8|8|8|0|8|0|8|8|8|8|8|8|3|8|8|8|8|8|0
+8|0|0|0|0|0|0|0|0|8|0|0|0|0|0|0|3|2|3|0|0|0|8|0
+8|8|0|8|8|8|0|8|8|8|0|8|8|8|8|8|8|3|8|8|8|0|8|0
+0|8|0|8|0|8|0|8|0|0|0|8|0|0|0|0|8|0|8|0|8|0|8|0
+0|8|8|8|0|8|8|8|0|8|8|8|0|8|8|0|8|8|8|0|8|8|8|0
+
+Output:
+
+ASCII representation:
+8|3|2|3|2|3|8|8|8|8|8|8|0|8|8|8|2|8|8|0|8|8|8|0
+3|2|8|8|8|2|3|2|3|2|3|8|0|0|0|8|3|8|0|0|8|2|8|0
+8|8|8|0|8|3|8|8|8|8|2|8|8|8|0|8|2|8|8|8|8|3|8|0
+8|0|0|0|8|2|8|0|0|8|3|2|3|8|0|8|3|2|3|2|3|2|8|0
+8|0|8|8|8|3|8|8|0|8|2|8|8|8|0|8|8|3|8|8|8|8|8|0
+8|0|8|2|3|2|3|8|0|8|3|8|0|0|0|0|8|2|8|0|0|0|0|0
+8|0|8|8|8|8|8|8|0|8|2|8|8|8|8|8|8|3|8|8|8|8|8|0
+8|0|0|0|0|0|0|0|0|8|3|2|3|2|3|2|3|2|3|2|3|2|8|0
+8|8|0|8|8|8|0|8|8|8|2|8|8|8|8|8|8|3|8|8|8|3|8|0
+0|8|0|8|0|8|0|8|3|2|3|8|0|0|0|0|8|2|8|0|8|2|8|0
+0|8|8|8|0|8|8|8|2|8|8|8|0|8|8|0|8|8|8|0|8|8|8|0
+
+Example 2:
+Input:
+
+ASCII representation:
+0|0|0|8|0|0|0|8|0|0|0|0|0|8
+8|8|0|8|8|8|0|8|0|8|8|8|0|8
+0|8|0|0|0|8|0|8|0|8|0|8|8|8
+0|8|8|8|8|8|0|8|0|8|0|0|0|0
+0|0|0|0|0|0|0|8|0|8|8|8|0|8
+8|8|8|8|8|8|0|8|0|0|0|8|0|8
+8|0|0|0|0|8|0|8|8|8|0|8|0|8
+8|8|8|8|0|8|0|0|0|8|0|8|0|0
+0|0|0|8|1|8|8|8|8|8|0|8|8|0
+8|8|0|8|4|1|0|0|0|0|0|0|8|0
+0|8|0|8|1|8|8|8|8|8|8|8|8|0
+0|8|8|8|0|8|0|0|0|0|0|0|0|0
+0|0|0|0|0|8|0|8|8|8|8|8|8|8
+
+Output:
+
+ASCII representation:
+0|0|0|8|0|0|0|8|1|4|1|4|1|8
+8|8|0|8|8|8|0|8|4|8|8|8|4|8
+0|8|0|0|0|8|0|8|1|8|0|8|8|8
+0|8|8|8|8|8|0|8|4|8|0|0|0|0
+0|0|0|0|0|0|0|8|1|8|8|8|0|8
+8|8|8|8|8|8|0|8|4|1|4|8|0|8
+8|4|1|4|1|8|0|8|8|8|1|8|0|8
+8|8|8|8|4|8|0|0|0|8|4|8|0|0
+0|0|0|8|1|8|8|8|8|8|1|8|8|0
+8|8|0|8|4|1|4|1|4|1|4|1|8|0
+1|8|0|8|1|8|8|8|8|8|8|8|8|0
+4|8|8|8|4|8|0|0|0|0|0|0|0|0
+1|4|1|4|1|8|0|8|8|8|8|8|8|8
+
+
+============================================================
+TEST EXAMPLES (to solve)
+============================================================
+Below are 1 test example(s) you need to solve:
+For each test example, only the input grid is provided. You must determine the output.
+
+Test Example 1:
+Input:
+
+ASCII representation:
+8|8|0|8|0|0|8|0|0|0|0|0|0|0|0
+0|8|0|8|8|8|8|4|8|8|8|8|8|8|8
+0|8|0|0|0|0|4|3|8|0|0|0|0|0|8
+0|8|8|8|8|8|8|4|8|8|8|0|8|8|8
+0|0|0|0|0|0|8|0|0|0|8|0|8|0|0
+8|8|8|8|8|0|8|8|8|0|8|0|8|0|8
+0|0|0|0|8|0|0|0|8|0|8|0|8|0|8
+8|8|8|0|8|8|8|0|8|0|8|0|8|8|8
+0|0|8|0|0|0|8|0|8|0|8|0|0|0|0
+8|0|8|8|8|0|8|8|8|0|8|8|8|0|8
+8|0|0|0|8|0|0|0|0|0|0|0|8|0|8
+8|8|8|0|8|0|8|8|8|8|8|8|8|0|8
+0|0|8|0|8|0|8|0|0|0|0|0|0|0|8
+8|0|8|8|8|0|8|0|8|8|8|8|8|8|8
+8|0|0|0|0|0|8|0|8|0|0|0|0|0|0
+
+Output: [TO BE DETERMINED]
+
+Solution:
+```python
+def solve_b782dc8a(I):
+    x1 = least_common_color(I)
+    x2 = as_objects(I, True, False, False)
+    x3 = of_color(I, x1)
+    x4 = get_first(x3)
+    x5 = direct_neighbors(x4)
+    x6 = to_object(x5, I)
+    x7 = most_common_color(x6)
+    x8 = of_color(I, x7)
+    x9 = color_filter(x2, COLOR_ZERO)
+    x10 = fix_last_argument(adjacent, x8)
+    x11 = keep_if_condition_and_flatten(x9, x10)
+    x12 = to_indices(x11)
+    x13 = fix_last_argument(manhattan_distance, x3)
+    x14 = chain(is_even, x13, initset)
+    x15 = keep_if_condition(x12, x14)
+    x16 = difference(x12, x15)
+    x17 = fill(I, x1, x15)
+    O = fill(x17, x7, x16)
+    return O
+```
+
+---------------------------
+Now you need to solve the following Task:
+"""
+    return prompt + fs_ex + prompt_task

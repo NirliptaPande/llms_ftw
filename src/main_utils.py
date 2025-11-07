@@ -530,8 +530,7 @@ def process_directory(
                 task,
                 task_id,
                 prompter,
-                n_workers=n_workers,
-                timeout=timeout,
+                similar_programs=similar_programs,
                 verbose=verbose
             )))
             

@@ -517,7 +517,7 @@ def main():
     """Main entry point"""
     # print("Initializing components...", flush=True)
     load_dotenv()
-    PROVIDER = "gemini"
+    PROVIDER = "openai"
     if PROVIDER == "grok":
         api_key = os.getenv('GROK_API_KEY')
         api_base = "https://api.x.ai/v1"
@@ -530,6 +530,10 @@ def main():
         api_key = os.getenv('GEMINI_API_KEY')
         api_base = "https://generativelanguage.googleapis.com/v1beta"
         model = "gemini-2.5-pro"
+    elif PROVIDER == "openai":
+        api_key = os.getenv('OPENAI_API_KEY')
+        api_base = "https://api.openai.com/v1"
+        model = "gpt-4o-mini"  # or "gpt-4o-mini" for cheaper option
         
     vlm_config_phase1 = VLMConfig(
         api_key=api_key,

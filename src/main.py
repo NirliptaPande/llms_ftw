@@ -387,7 +387,7 @@ Combat this by evolving your hypothesis"""
         phase1_result = phase1_results[idx]
         validated_pattern = extract_validated_pattern_from_response(phase2b_results[idx])
         
-        prompt = prompter.build_phase2c_prompt(task, validated_pattern, phase1_result.similar_programs)
+        prompt = prompter.build_phase2c_prompt(task, validated_pattern, phase1_result.similar_programs, few_shot=True)
         phase2c_prompts.append(prompt)
         phase2c_indices.append(idx)
     
@@ -619,11 +619,11 @@ def main():
         library=library,
         timeout=2,
         max_find_similar_workers= 56,
-        log_dir="logs_new_dsl",#TODO change log dir
+        log_dir="logs_new_dsl_fewshot",#TODO change log dir
         verbose=True
     )
     
-    save_results(results, output_dir='results/new_dsl')#TODO change result dir
+    save_results(results, output_dir='results/new_dsl_fewshot')#TODO change result dir
 
 
 if __name__ == "__main__":

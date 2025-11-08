@@ -566,7 +566,7 @@ def process_directory(
 
     for task_id, task, generated_code, phase1_output, phase2_output in zip(list_task_id, list_task, list_generated_code, out_1, out_2):
         if not generated_code:
-            return TaskResult(
+            result = TaskResult(
                 task_id=task_id,
                 success=False,
                 score=0.0,
@@ -707,7 +707,7 @@ def process_directory_fs(
     list_generated_code = [extract_code_from_response(resp) for resp in out_1]
     for task_id, task, generated_code, phase1_output in zip(list_task_id, list_task, list_generated_code, out_1):
         if not generated_code:
-            return TaskResult(
+            result = TaskResult(
                 task_id=task_id,
                 success=False,
                 score=0.0,

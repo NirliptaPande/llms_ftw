@@ -311,7 +311,8 @@ class ProgramLibrary:
                     train_examples: List[Dict[str, Any]], 
                     top_k: int = 3,
                     min_similarity: float = 0.0,
-                    timeout: int = 2) -> List[Dict]:
+                    timeout: int = 2,
+                    verbose: bool = False) -> List[Dict]:
         """
         Find programs based on execution similarity.
         
@@ -324,17 +325,19 @@ class ProgramLibrary:
         Returns:
             List of similar programs sorted by similarity
         """
-        print(f"\n=== DEBUG find_similar ===", flush=True)
-        print(f"Number of train examples: {len(train_examples)}", flush=True)
-        print(f"Number of programs in library: {len(self.programs)}", flush=True)
-        print(f"min_similarity threshold: {min_similarity}", flush=True)
-        print(f"top_k: {top_k}", flush=True)
+        if verbose:
+            print(f"\n=== DEBUG find_similar ===", flush=True)
+            print(f"Number of train examples: {len(train_examples)}", flush=True)
+            print(f"Number of programs in library: {len(self.programs)}", flush=True)
+            print(f"min_similarity threshold: {min_similarity}", flush=True)
+            print(f"top_k: {top_k}", flush=True)
         
-        if not train_examples:
+        if not train_examples and verbose:
             print("WARNING: No train examples provided!", flush=True)
             return []
         
-        print(f"Running sequential evaluation (timeout: {timeout}s per program)", flush=True)
+        if verbose:
+            print(f"Running sequential evaluation (timeout: {timeout}s per program)", flush=True)
         
         # Prepare program data for processing
         prog_data_list = [
@@ -355,7 +358,7 @@ class ProgramLibrary:
             completed += 1
             
             # Progress update every 50 programs
-            if completed % 50 == 0 or completed == len(self.programs):
+            if completed % 50 == 0 or completed == len(self.programs) and verbose:
                 elapsed = time.time() - start_time
                 rate = completed / elapsed if elapsed > 0 else 0
                 print(f"Progress: {completed}/{len(self.programs)} programs ({rate:.1f}/s, {elapsed:.1f}s elapsed)", flush=True)
@@ -382,13 +385,14 @@ class ProgramLibrary:
                 if failed <= 5:  # Only log first few errors
                     print(f"WARNING: Program {idx} ({prog_data[0]}) failed: {e}", flush=True)
         
-        total_time = time.time() - start_time
-        print(f"\nEvaluation complete: {completed}/{len(self.programs)} programs in {total_time:.1f}s", flush=True)
-        if failed > 0:
-            print(f"Failed/timed out: {failed} programs", flush=True)
+        if verbose:
+            total_time = time.time() - start_time
+            print(f"\nEvaluation complete: {completed}/{len(self.programs)} programs in {total_time:.1f}s", flush=True)
+            if failed > 0:
+                print(f"Failed/timed out: {failed} programs", flush=True)
         
         # DEBUGGING: Show statistics about all results
-        if len(all_results) > 0:
+        if len(all_results) > 0 and verbose:
             error_counts = sum(1 for r in all_results if r['errors'] > 0)
             max_sim = max((r['similarity'] for r in all_results), default=0.0)
             avg_sim = sum(r['similarity'] for r in all_results) / len(all_results)
@@ -415,79 +419,80 @@ class ProgramLibrary:
         perfect_programs.sort(key=lambda x: x['similarity'], reverse=True)
         other_programs.sort(key=lambda x: x['similarity'], reverse=True)
         
-        print(f"\n=== Results ===", flush=True)
-        print(f"Programs with perfect examples: {len(perfect_programs)}", flush=True)
-        print(f"Other programs above threshold: {len(other_programs)}", flush=True)
+        if verbose:
+            print(f"\n=== Results ===", flush=True)
+            print(f"Programs with perfect examples: {len(perfect_programs)}", flush=True)
+            print(f"Other programs above threshold: {len(other_programs)}", flush=True)
         
         # Return all perfect programs + top_k others
         if perfect_programs:
             result = perfect_programs + other_programs[:top_k]
         else:
             result = other_programs[:top_k]
-        
-        print(f"Returning {len(result)} programs", flush=True)
-        if len(result) > 0:
-            print(f"Top program: {result[0]['task_id']} (sim: {result[0]['similarity']:.3f})", flush=True)
-            if len(result) > 1:
-                print(f"Second program: {result[1]['task_id']} (sim: {result[1]['similarity']:.3f})", flush=True)
+        if verbose:
+            print(f"Returning {len(result)} programs", flush=True)
+            if len(result) > 0:
+                print(f"Top program: {result[0]['task_id']} (sim: {result[0]['similarity']:.3f})", flush=True)
+                if len(result) > 1:
+                    print(f"Second program: {result[1]['task_id']} (sim: {result[1]['similarity']:.3f})", flush=True)
         
         return result
-        def test_program(self, 
-                        solve_func, 
-                        train_examples: List[Dict[str, Any]],
-                        timeout: int = 2) -> Dict:
-            """
-            Test a single program on training examples.
-            
-            Args:
-                solve_func: Function to test
-                train_examples: List of {'input': grid, 'output': grid}
-                timeout: Timeout per execution in seconds
-            
-            Returns:
-                Dict with keys: avg_similarity, example_results
-            """
-            results = []
-            
-            for i, example in enumerate(train_examples):
-                input_grid = example['input']
-                expected_output = example['output']
-                
-                output, error = execute_program_safely(solve_func, input_grid, timeout_seconds=timeout)
-                
-                if error is not None:
-                    results.append({
-                        'example_idx': i,
-                        'success': False,
-                        'error': error,
-                        'similarity': 0.0
-                    })
-                else:
-                    sim = calculate_grid_similarity(output, expected_output)
-                    results.append({
-                        'example_idx': i,
-                        'success': True,
-                        'similarity': sim,
-                        'output': output
-                    })
-            
-            avg_sim = sum(r['similarity'] for r in results) / len(results) if results else 0.0
-            
-            return {
-                'avg_similarity': avg_sim,
-                'example_results': results
-            }
+    def test_program(self, 
+                    solve_func, 
+                    train_examples: List[Dict[str, Any]],
+                    timeout: int = 2) -> Dict:
+        """
+        Test a single program on training examples.
         
-        def get(self, task_id: str) -> Dict:
-            """Get program by task ID"""
-            for prog in self.programs:
-                if prog['task_id'] == task_id:
-                    return prog
-            return None
+        Args:
+            solve_func: Function to test
+            train_examples: List of {'input': grid, 'output': grid}
+            timeout: Timeout per execution in seconds
         
-        def __len__(self):
-            """Number of programs in library"""
-            return len(self.programs)
+        Returns:
+            Dict with keys: avg_similarity, example_results
+        """
+        results = []
+        
+        for i, example in enumerate(train_examples):
+            input_grid = example['input']
+            expected_output = example['output']
+            
+            output, error = execute_program_safely(solve_func, input_grid, timeout_seconds=timeout)
+            
+            if error is not None:
+                results.append({
+                    'example_idx': i,
+                    'success': False,
+                    'error': error,
+                    'similarity': 0.0
+                })
+            else:
+                sim = calculate_grid_similarity(output, expected_output)
+                results.append({
+                    'example_idx': i,
+                    'success': True,
+                    'similarity': sim,
+                    'output': output
+                })
+        
+        avg_sim = sum(r['similarity'] for r in results) / len(results) if results else 0.0
+        
+        return {
+            'avg_similarity': avg_sim,
+            'example_results': results
+        }
+    
+    def get(self, task_id: str) -> Dict:
+        """Get program by task ID"""
+        for prog in self.programs:
+            if prog['task_id'] == task_id:
+                return prog
+        return None
+    
+    def __len__(self):
+        """Number of programs in library"""
+        return len(self.programs)
 
 
 def format_similar_programs_for_prompt(similar_programs: List[Dict]) -> List[Dict[str, Any]]:

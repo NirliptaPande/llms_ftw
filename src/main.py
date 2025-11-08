@@ -1,9 +1,7 @@
 """
 Main pipeline for ARC task solving using execution-based similarity.
 
-Pipeline: Sequential phases per task, parallelized across tasks
-- Each task: Phase 1 (find_similar) → Phase 2 (generate solution) sequentially
-- Multiple tasks run in parallel
+Pipeline: Batched approach - collect all prompts, send all API calls in parallel
 """
 
 import re
@@ -15,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import sys
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -46,8 +43,8 @@ class TaskResult:
     success: bool
     score: float
     program: Optional[str] = None
-    phase2a_output: Optional[str] = None  # Hypothesis formation
-    phase2b_output: Optional[str] = None  # Hypothesis validation
+    phase2a_output: Optional[str] = None
+    phase2b_output: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -64,13 +61,7 @@ class Phase1Result:
 
 
 def test_program(program_code: str, task: Dict) -> Tuple[float, List[Tuple[Any, Any, bool]]]:
-    """
-    Test a program against task training examples.
-    
-    Returns:
-        - Average score across examples
-        - List of (expected_output, actual_output, passed) tuples
-    """
+    """Test a program against task test examples."""
     namespace = globals().copy()
     
     try:
@@ -125,30 +116,19 @@ def phase1_find_similar(
     task: Dict,
     task_id: str,
     library: ProgramLibrary,
-    timeout: int = 2
+    timeout: int = 2,
+    verbose: bool = True
 ) -> Phase1Result:
-    """
-    Phase 1: Find similar programs by execution.
-    
-    Args:
-        task: Task dictionary with 'train' examples
-        task_id: Unique task identifier
-        library: Program library
-        timeout: Timeout per program execution
-        
-    Returns:
-        Phase1Result with similar programs and library matches
-    """
+    """Phase 1: Find similar programs by execution."""
     try:
-        # Find similar programs by execution (now sequential)
         similar_programs = library.find_similar(
             train_examples=task['train'],
             top_k=5,
             min_similarity=0.1,
-            timeout=timeout
+            timeout=timeout,
+            verbose=verbose
         )
         
-        # Test library programs for perfect match
         best_library_score = 0.0
         best_library_program = None
         perfect_match = False
@@ -397,84 +377,28 @@ Combat this by evolving your hypothesis as you see each training example."""
 
 def extract_hypothesis_from_response(response: str) -> str:
     """Extract the final hypothesis from phase 2a response."""
-    import re
-    
-    # Try to find pattern_summary first
     pattern_match = re.search(r'<pattern_summary>(.*?)</pattern_summary>', 
                              response, re.DOTALL)
     if pattern_match:
         return pattern_match.group(1).strip()
     
-    # Fall back to last hypothesis tag
     hypothesis_matches = re.findall(r'<hypothesis_\d+>(.*?)</hypothesis_\d+>', 
                                    response, re.DOTALL)
     if hypothesis_matches:
         return hypothesis_matches[-1].strip()
     
-    # If no tags found, return last substantial paragraph
     paragraphs = [p.strip() for p in response.split('\n\n') if len(p.strip()) > 50]
     return paragraphs[-1] if paragraphs else response[-500:]
 
 
 def extract_validated_pattern_from_response(response: str) -> str:
     """Extract the validated pattern from phase 2b response."""
-    import re
-    
-    # Try to find validated_pattern first
     pattern_match = re.search(r'<validated_pattern>(.*?)</validated_pattern>', 
                              response, re.DOTALL)
     if pattern_match:
         return pattern_match.group(1).strip()
     
-    # If no tag found, return entire response (it's all the validated pattern)
     return response.strip()
-
-
-def process_single_task(
-    task_id: str,
-    task: Dict,
-    vlm_client_phase1: BaseVLMClient,
-    vlm_client_phase2: BaseVLMClient,
-    prompter: VLMPrompter,
-    library: ProgramLibrary,
-    timeout: int = 2,
-    log_dir: str = "logs"
-) -> TaskResult:
-    """
-    Process a single task through all phases sequentially.
-    
-    Args:
-        task_id: Task identifier
-        task: Task data
-        vlm_client_phase1: VLM client for pattern discovery
-        vlm_client_phase2: VLM client for code generation
-        prompter: Prompt builder
-        library: Program library
-        timeout: Timeout per program execution
-        log_dir: Directory for logs
-    
-    Returns:
-        TaskResult
-    """
-    # Phase 1: Find similar programs
-    phase1_result = phase1_find_similar(
-        task=task,
-        task_id=task_id,
-        library=library,
-        timeout=timeout
-    )
-    
-    # Phase 2: Generate solution
-    phase2_result = phase2_generate_solution(
-        phase1_result=phase1_result,
-        vlm_client_phase1=vlm_client_phase1,
-        vlm_client_phase2=vlm_client_phase2,
-        prompter=prompter,
-        library=library,
-        log_dir=log_dir
-    )
-    
-    return phase2_result
 
 
 def process_directory(
@@ -484,24 +408,19 @@ def process_directory(
     prompter: VLMPrompter,
     library: ProgramLibrary,
     timeout: int = 2,
-    max_concurrent_tasks: int = 10,
-    log_dir: str = "logs"
+    max_find_similar_workers: int = 4,
+    log_dir: str = "logs",
+    verbose: bool = True
 ) -> List[TaskResult]:
     """
-    Process all task files with sequential phases per task, parallelized across tasks.
+    Process all tasks with fully batched API calls.
     
-    Args:
-        data_dir: Directory containing task JSON files
-        vlm_client_phase1: VLM client for pattern discovery
-        vlm_client_phase2: VLM client for code generation
-        prompter: Prompt builder
-        library: Program library
-        timeout: Timeout per program execution
-        max_concurrent_tasks: Maximum number of tasks to process in parallel
-        log_dir: Directory for logs
-    
-    Returns:
-        List of TaskResult objects
+    Strategy:
+    1. Run find_similar in parallel for all tasks
+    2. Batch ALL phase2a prompts → send in parallel
+    3. Batch ALL phase2b prompts → send in parallel
+    4. Batch ALL phase2c prompts → send in parallel
+    5. Execute all code sequentially
     """
     data_path = Path(data_dir)
     
@@ -515,18 +434,15 @@ def process_directory(
         print(f"No JSON files found in {data_dir}", flush=True)
         return []
     
-    print(f"\n{'='*80}", flush=True)
-    print(f"SEQUENTIAL PIPELINE (PARALLELIZED ACROSS TASKS)", flush=True)
-    print(f"{'='*80}", flush=True)
-    print(f"Total tasks: {len(json_files)}", flush=True)
-    print(f"Max concurrent tasks: {max_concurrent_tasks}", flush=True)
-    print(f"Timeout per program: {timeout}s", flush=True)
-    print(f"{'='*80}\n", flush=True)
+    if verbose:
+        print(f"\n{'='*80}", flush=True)
+        print(f"BATCHED PIPELINE - ALL API CALLS IN PARALLEL", flush=True)
+        print(f"{'='*80}", flush=True)
+        print(f"Total tasks: {len(json_files)}", flush=True)
+        print(f"{'='*80}\n", flush=True)
     
     # Load all tasks
-    print(f"Loading {len(json_files)} tasks...", flush=True)
     tasks_data = []
-    
     for task_file in json_files:
         task_id = task_file.stem
         try:
@@ -536,79 +452,298 @@ def process_directory(
         except Exception as e:
             print(f"✗ {task_id}: {e}", flush=True)
     
-    print(f"Loaded {len(tasks_data)} valid tasks\n", flush=True)
+    if verbose:
+        print(f"Loaded {len(tasks_data)} tasks\n", flush=True)
     
-    # Statistics tracking
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    
+    # ========================================================================
+    # PHASE 1: Find similar (parallel)
+    # ========================================================================
+    if verbose:
+        print(f"Phase 1: Finding similar programs...", flush=True)
+    
+    time_start = time.time()
+    phase1_results = [None] * len(tasks_data)
+    
+    def run_phase1(idx, task_id, task, verbose=verbose):
+        return idx, phase1_find_similar(task, task_id, library, timeout, verbose)
+    
+    with ThreadPoolExecutor(max_workers=max_find_similar_workers) as executor:
+        futures = [
+            executor.submit(run_phase1, idx, task_id, task)
+            for idx, (task_id, task) in enumerate(tasks_data)
+        ]
+        for future in as_completed(futures):
+            idx, result = future.result()
+            phase1_results[idx] = result
+    
+    time_phase1 = time.time()
+    if verbose:
+        print(f"Phase 1 complete: {time_phase1 - time_start:.1f}s\n", flush=True)
+    
+    # ========================================================================
+    # PHASE 2A: Batch all prompts
+    # ========================================================================
+
+    if verbose:
+        print(f"Phase 2A: Building prompts...", flush=True)
+    
+    phase2a_prompts = []
+    phase2a_indices = []
+    
+    for idx, (phase1_result, (task_id, task)) in enumerate(zip(phase1_results, tasks_data)):
+        if phase1_result.perfect_match_found or phase1_result.error:
+            continue
+        
+        prompt = prompter.build_phase2a_prompt(task, phase1_result.similar_programs)
+        phase2a_prompts.append(prompt)
+        phase2a_indices.append(idx)
+    
+    if verbose:
+        print(f"Sending {len(phase2a_prompts)} prompts to API...", flush=True)
+    
+    phase2a_outputs = []
+    if phase2a_prompts:
+        system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. Remember the puzzles are not very complex and usually involve simple sequential transformations.
+            
+Remember: Your first hypothesis is sticky and excessively convincing to you.
+Combat this by evolving your hypothesis as you see each training example."""
+        
+        with ThreadPoolExecutor(max_workers=len(phase2a_prompts)) as executor:
+            futures = [executor.submit(vlm_client_phase1.query, p, system_prompt) for p in phase2a_prompts]
+            phase2a_outputs = [f.result() for f in futures]
+    
+    # Store outputs
+    phase2a_results = [None] * len(tasks_data)
+    for idx, output in zip(phase2a_indices, phase2a_outputs):
+        phase2a_results[idx] = output
+        
+        task_id = tasks_data[idx][0]
+        log_path = os.path.join(log_dir, f"{task_id}_phase2a_hypothesis.txt")
+        with open(log_path, 'w') as f:
+            f.write(f"Task ID: {task_id}\n{'='*80}\n")
+            f.write("PHASE 2A: HYPOTHESIS FORMATION\n{'='*80}\n\n")
+            f.write(output)
+    
+    time_phase2a = time.time()
+    if verbose:
+        print(f"Phase 2A complete: {time_phase2a - time_phase1:.1f}s\n", flush=True)
+    
+    # ========================================================================
+    # PHASE 2B: Batch all prompts
+    # ========================================================================
+    if verbose:
+        print(f"Phase 2B: Building prompts...", flush=True)
+    
+    phase2b_prompts = []
+    phase2b_indices = []
+    
+    for idx in phase2a_indices:
+        task_id, task = tasks_data[idx]
+        phase1_result = phase1_results[idx]
+        hypothesis = extract_hypothesis_from_response(phase2a_results[idx])
+        
+        prompt = prompter.build_phase2b_prompt(task, hypothesis, phase1_result.similar_programs)
+        phase2b_prompts.append(prompt)
+        phase2b_indices.append(idx)
+    
+    if verbose:
+        print(f"Sending {len(phase2b_prompts)} prompts to API...", flush=True)
+    
+    phase2b_outputs = []
+    if phase2b_prompts:
+        system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns.
+
+You are given an initial hypothesis about the puzzle. If the hypothesis doesn't extend to the test input while explaining the training examples, refine it to create a more accurate pattern description.
+Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple transformation that applies to all samples, both training and test.
+Combat this by evolving your hypothesis"""
+        
+        with ThreadPoolExecutor(max_workers=len(phase2b_prompts)) as executor:
+            futures = [executor.submit(vlm_client_phase1.query, p, system_prompt) for p in phase2b_prompts]
+            phase2b_outputs = [f.result() for f in futures]
+    
+    # Store outputs
+    phase2b_results = [None] * len(tasks_data)
+    for idx, output in zip(phase2b_indices, phase2b_outputs):
+        phase2b_results[idx] = output
+        
+        task_id = tasks_data[idx][0]
+        hypothesis = extract_hypothesis_from_response(phase2a_results[idx])
+        log_path = os.path.join(log_dir, f"{task_id}_phase2b_validation.txt")
+        with open(log_path, 'w') as f:
+            f.write(f"Task ID: {task_id}\n{'='*80}\n")
+            f.write(f"PHASE 2B: HYPOTHESIS VALIDATION\n{'='*80}\n\n")
+            f.write(f"INITIAL HYPOTHESIS:\n{'-'*80}\n{hypothesis}\n{'-'*80}\n\n")
+            f.write(f"VALIDATION OUTPUT:\n{'-'*80}\n{output}")
+    
+    time_phase2b = time.time()
+    if verbose:
+        print(f"Phase 2B complete: {time_phase2b - time_phase2a:.1f}s\n", flush=True)
+    
+    # ========================================================================
+    # PHASE 2C: Batch all prompts
+    # ========================================================================
+    if verbose:
+        print(f"Phase 2C: Building prompts...", flush=True)
+    
+    phase2c_prompts = []
+    phase2c_indices = []
+    
+    for idx in phase2b_indices:
+        task_id, task = tasks_data[idx]
+        phase1_result = phase1_results[idx]
+        validated_pattern = extract_validated_pattern_from_response(phase2b_results[idx])
+        
+        prompt = prompter.build_phase2c_prompt(task, validated_pattern, phase1_result.similar_programs)
+        phase2c_prompts.append(prompt)
+        phase2c_indices.append(idx)
+    
+    if verbose:
+        print(f"Sending {len(phase2c_prompts)} prompts to API...", flush=True)
+    
+    phase2c_outputs = []
+    if phase2c_prompts:
+        system_prompt = "You are an expert at generating code using the given DSL primitives to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training and test examples and some similar programs you might find useful as reference. Generate a Python function `def solve(I):` that implements the described transformation using ONLY the provided DSL primitives. Ensure your code is syntactically correct and follows best practices"
+        
+        with ThreadPoolExecutor(max_workers=len(phase2c_prompts)) as executor:
+            futures = [executor.submit(vlm_client_phase2.query, p, system_prompt) for p in phase2c_prompts]
+            phase2c_outputs = [f.result() for f in futures]
+    
+    time_phase2c = time.time()
+    if verbose:
+        print(f"Phase 2C complete: {time_phase2c - time_phase2b:.1f}s\n", flush=True)
+    
+    # ========================================================================
+    # CODE EXECUTION
+    # ========================================================================
+    if verbose:
+        print(f"Testing programs...", flush=True)
+    
     results = []
-    results_lock = threading.Lock()
-    stats = {
-        'completed': 0,
-        'successful': 0,
-        'total_score': 0.0
-    }
-    stats_lock = threading.Lock()
+    successful = 0
+    total_score = 0.0
     
-    def worker(task_id, task):
-        """Worker function to process a single task"""
+    for idx, (task_id, task) in enumerate(tasks_data):
+        phase1_result = phase1_results[idx]
+        
+        # Handle perfect match
+        if phase1_result.perfect_match_found:
+            result = TaskResult(task_id, True, 1.0, phase1_result.best_library_program)
+            results.append(result)
+            successful += 1
+            total_score += 1.0
+            if verbose:
+                print(f"✓ [{idx+1}/{len(tasks_data)}] {task_id}: 1.00 (library)", flush=True)
+            continue
+        
+        # Handle phase1 errors
+        if phase1_result.error:
+            result = TaskResult(task_id, False, 0.0, error=f"Phase 1: {phase1_result.error}")
+            results.append(result)
+            if verbose:
+                print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (error)", flush=True)
+            continue
+        
+        # Get generated code
+        if idx not in phase2c_indices:
+            result = TaskResult(task_id, False, 0.0, error="No code generated")
+            results.append(result)
+            if verbose:
+                print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (no code)", flush=True)
+            continue
+        
+        output_idx = phase2c_indices.index(idx)
+        generated_code = extract_code_from_response(phase2c_outputs[output_idx])
+        
+        if not generated_code:
+            if phase1_result.best_library_program and phase1_result.best_library_score > 0.5:
+                result = TaskResult(
+                    task_id, False, phase1_result.best_library_score,
+                    phase1_result.best_library_program,
+                    phase2a_results[idx], phase2b_results[idx],
+                    "Code extraction failed, library fallback"
+                )
+            else:
+                result = TaskResult(
+                    task_id, False, 0.0, None,
+                    phase2a_results[idx], phase2b_results[idx],
+                    "Code extraction failed"
+                )
+            results.append(result)
+            total_score += result.score
+            if verbose:
+                print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: {result.score:.2f} (extract fail)", flush=True)
+            continue
+        
+        # Test code
         try:
-            result = process_single_task(
-                task_id=task_id,
-                task=task,
-                vlm_client_phase1=vlm_client_phase1,
-                vlm_client_phase2=vlm_client_phase2,
-                prompter=prompter,
-                library=library,
-                timeout=timeout,
-                log_dir=log_dir
+            score, test_results = test_program(generated_code, task)
+            success = score == 1.0
+            
+            final_program = generated_code
+            final_score = score
+            
+            if not success and phase1_result.best_library_score > score:
+                final_program = phase1_result.best_library_program
+                final_score = phase1_result.best_library_score
+            
+            if success:
+                namespace = globals().copy()
+                exec(final_program, namespace)
+                if 'solve' in namespace:
+                    library.add(task_id, final_program)
+            
+            result = TaskResult(
+                task_id, success, final_score, final_program,
+                phase2a_results[idx], phase2b_results[idx]
             )
             
-            with stats_lock:
-                stats['completed'] += 1
-                if result.success:
-                    stats['successful'] += 1
-                stats['total_score'] += result.score
-                
-                status = "✓" if result.success else "✗"
-                print(f"{status} [{stats['completed']}/{len(tasks_data)}] {result.task_id}: {result.score:.2f}", flush=True)
+            if success:
+                successful += 1
+            total_score += final_score
             
-            with results_lock:
-                results.append(result)
+            # Log
+            log_path = os.path.join(log_dir, f"{task_id}_phase2c_results.txt")
+            with open(log_path, 'w') as f:
+                f.write(f"Task ID: {task_id}\n{'='*80}\n")
+                f.write(f"CODE:\n{'-'*80}\n{generated_code}\n{'-'*80}\n\n")
+                f.write(f"SCORE: {score:.2f}\n")
             
-            return result
+            if verbose:
+                status = "✓" if success else "✗"
+                print(f"{status} [{idx+1}/{len(tasks_data)}] {task_id}: {final_score:.2f}", flush=True)
             
         except Exception as e:
-            print(f"✗ Error processing {task_id}: {e}", flush=True)
-            return TaskResult(
-                task_id=task_id,
-                success=False,
-                score=0.0,
-                error=str(e)
+            result = TaskResult(
+                task_id, False, 0.0, None,
+                phase2a_results[idx], phase2b_results[idx],
+                str(e)
             )
-    
-    # Process tasks in parallel
-    print(f"Starting task processing...\n", flush=True)
-    
-    with ThreadPoolExecutor(max_workers=max_concurrent_tasks) as executor:
-        futures = [
-            executor.submit(worker, task_id, task)
-            for task_id, task in tasks_data
-        ]
+            if verbose:
+                print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (error)", flush=True)
         
-        # Wait for all tasks to complete
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                print(f"Task failed with exception: {e}", flush=True)
+        results.append(result)
+    
+    time_execution = time.time()
     
     # Summary
-    print(f"\n{'='*80}", flush=True)
-    print(f"SUMMARY", flush=True)
-    print(f"{'='*80}", flush=True)
-    print(f"Total tasks: {len(tasks_data)}", flush=True)
-    print(f"Successful: {stats['successful']}/{len(tasks_data)} ({100*stats['successful']/len(tasks_data):.1f}%)", flush=True)
-    print(f"Average score: {stats['total_score']/len(tasks_data):.2f}", flush=True)
-    print(f"{'='*80}\n", flush=True)
+    if verbose:
+        print(f"\n{'='*80}", flush=True)
+        print(f"TIME BREAKDOWN", flush=True)
+        print(f"{'='*80}", flush=True)
+        print(f"Phase 1 (find_similar): {time_phase1 - time_start:.1f}s", flush=True)
+        print(f"Phase 2A (hypothesis): {time_phase2a - time_phase1:.1f}s", flush=True)
+        print(f"Phase 2B (validation): {time_phase2b - time_phase2a:.1f}s", flush=True)
+        print(f"Phase 2C (code gen): {time_phase2c - time_phase2b:.1f}s", flush=True)
+        print(f"Code execution: {time_execution - time_phase2c:.1f}s", flush=True)
+        print(f"Total: {time_execution - time_start:.1f}s", flush=True)
+        print(f"\n{'='*80}", flush=True)
+        print(f"RESULTS", flush=True)
+        print(f"{'='*80}", flush=True)
+        print(f"Successful: {successful}/{len(tasks_data)} ({100*successful/len(tasks_data):.1f}%)", flush=True)
+        print(f"Average score: {total_score/len(tasks_data):.2f}", flush=True)
+        print(f"{'='*80}\n", flush=True)
     
     return results
 
@@ -620,7 +755,6 @@ def save_results(results: List[TaskResult], output_dir: str = 'results') -> None
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # JSON
     json_file = output_path / 'results.json'
     with open(json_file, 'w') as f:
         json_data = [
@@ -634,9 +768,8 @@ def save_results(results: List[TaskResult], output_dir: str = 'results') -> None
             for r in results
         ]
         json.dump(json_data, f, indent=2)
-    print(f"Saved detailed results to {json_file}", flush=True)
+    print(f"Saved results to {json_file}", flush=True)
     
-    # CSV
     csv_file = output_path / 'summary.csv'
     with open(csv_file, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -648,7 +781,6 @@ def save_results(results: List[TaskResult], output_dir: str = 'results') -> None
 
 def main():
     from dotenv import load_dotenv
-    """Main entry point"""
     load_dotenv()
     PROVIDER = "grok"
     
@@ -676,7 +808,7 @@ def main():
         max_tokens=16384,
         max_retries=3,
         save_prompts=False,
-        prompt_log_dir="prompts_test_1"#TODO change dir if needed
+        prompt_log_dir="prompts_old_dsl"#TODO change prompt log dir
     )
     vlm_config_phase2 = VLMConfig(
         api_key=api_key,
@@ -693,7 +825,6 @@ def main():
     prompter = VLMPrompter()
     library = ProgramLibrary()
     
-    # Run simplified pipeline
     results = process_directory(
         data_dir='data_v2/overfit_23',#TODO change dir if needed
         vlm_client_phase1=vlm_client_phase1,
@@ -701,11 +832,12 @@ def main():
         prompter=prompter,
         library=library,
         timeout=2,
-        max_concurrent_tasks=10,  # Process 10 tasks in parallel
-        log_dir="logs_test_1"#TODO change dir if needed
+        max_find_similar_workers= 56,
+        log_dir="logs_old_dsl",#TODO change log dir
+        verbose=False
     )
     
-    save_results(results, output_dir='results/test_1')#TODO change dir if needed
+    save_results(results, output_dir='results/old_dsl')#TODO change result dir
 
 
 if __name__ == "__main__":

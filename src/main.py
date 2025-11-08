@@ -29,7 +29,13 @@ class ThreadSafeVLMClient:
         self.client = client
     
     def query(self, prompt, system_prompt=None):
-        return self.client.query(prompt, system_prompt)
+        try:
+            return self.client.query(prompt, system_prompt)
+        except TimeoutError as e:
+            print(f"TimeoutError: {e}", flush=True)
+            return ""
+        except Exception as e:
+            return ""
     
     def __getattr__(self, name):
         return getattr(self.client, name)
@@ -116,7 +122,7 @@ def phase1_find_similar(
     task_id: str,
     library: ProgramLibrary,
     timeout: int = 2,
-    verbose: bool = True
+    verbose: bool = False
 ) -> Phase1Result:
     """Phase 1: Find similar programs by execution."""
     try:
@@ -125,7 +131,8 @@ def phase1_find_similar(
             top_k=5,
             min_similarity=0.1,
             timeout=timeout,
-            verbose=verbose
+            verbose=verbose,
+            n_workers=None
         )
         
         best_library_score = 0.0
@@ -252,21 +259,20 @@ def process_directory(
     time_start = time.time()
     phase1_results = [None] * len(tasks_data)
     
-    def run_phase1(idx, task_id, task, verbose=verbose):
-        return idx, phase1_find_similar(task, task_id, library, timeout, verbose)
+    # def run_phase1(idx, task_id, task, verbose=verbose):
+    #     return idx, phase1_find_similar(task, task_id, library, timeout, verbose)
     
-    with ThreadPoolExecutor(max_workers=max_find_similar_workers) as executor:
-        futures = [
-            executor.submit(run_phase1, idx, task_id, task)
-            for idx, (task_id, task) in enumerate(tasks_data)
-        ]
-        for future in as_completed(futures):
-            idx, result = future.result()
-            phase1_results[idx] = result
-    
+    time_start = time.time()
+    phase1_results = [None] * len(tasks_data)
+
+    for idx, (task_id, task) in enumerate(tasks_data):
+        result = phase1_find_similar(task, task_id, library, timeout, verbose)
+        phase1_results[idx] = result
+        
+
     time_phase1 = time.time()
-    if verbose:
-        print(f"Phase 1 complete: {time_phase1 - time_start:.1f}s\n", flush=True)
+
+    print(f"Phase 1 complete: {time_phase1 - time_start:.1f}s\n", flush=True)
     
     # ========================================================================
     # PHASE 2A: Batch all prompts
@@ -313,8 +319,8 @@ Combat this by evolving your hypothesis as you see each training example."""
             f.write(output)
     
     time_phase2a = time.time()
-    if verbose:
-        print(f"Phase 2A complete: {time_phase2a - time_phase1:.1f}s\n", flush=True)
+
+    print(f"Phase 2A complete: {time_phase2a - time_phase1:.1f}s\n", flush=True)
     
     # ========================================================================
     # PHASE 2B: Batch all prompts
@@ -364,8 +370,8 @@ Combat this by evolving your hypothesis"""
             f.write(f"VALIDATION OUTPUT:\n{'-'*80}\n{output}")
     
     time_phase2b = time.time()
-    if verbose:
-        print(f"Phase 2B complete: {time_phase2b - time_phase2a:.1f}s\n", flush=True)
+
+    print(f"Phase 2B complete: {time_phase2b - time_phase2a:.1f}s\n", flush=True)
     
     # ========================================================================
     # PHASE 2C: Batch all prompts
@@ -397,8 +403,7 @@ Combat this by evolving your hypothesis"""
             phase2c_outputs = [f.result() for f in futures]
     
     time_phase2c = time.time()
-    if verbose:
-        print(f"Phase 2C complete: {time_phase2c - time_phase2b:.1f}s\n", flush=True)
+    print(f"Phase 2C complete: {time_phase2c - time_phase2b:.1f}s\n", flush=True)
     
     # ========================================================================
     # CODE EXECUTION
@@ -514,23 +519,22 @@ Combat this by evolving your hypothesis"""
     time_execution = time.time()
     
     # Summary
-    if verbose:
-        print(f"\n{'='*80}", flush=True)
-        print(f"TIME BREAKDOWN", flush=True)
-        print(f"{'='*80}", flush=True)
-        print(f"Phase 1 (find_similar): {time_phase1 - time_start:.1f}s", flush=True)
-        print(f"Phase 2A (hypothesis): {time_phase2a - time_phase1:.1f}s", flush=True)
-        print(f"Phase 2B (validation): {time_phase2b - time_phase2a:.1f}s", flush=True)
-        print(f"Phase 2C (code gen): {time_phase2c - time_phase2b:.1f}s", flush=True)
-        print(f"Code execution: {time_execution - time_phase2c:.1f}s", flush=True)
-        print(f"Total: {time_execution - time_start:.1f}s", flush=True)
-        print(f"\n{'='*80}", flush=True)
-        print(f"RESULTS", flush=True)
-        print(f"{'='*80}", flush=True)
-        print(f"Successful: {successful}/{len(tasks_data)} ({100*successful/len(tasks_data):.1f}%)", flush=True)
-        print(f"Average score: {total_score/len(tasks_data):.2f}", flush=True)
-        print(f"{'='*80}\n", flush=True)
-    
+    print(f"\n{'='*80}", flush=True)
+    print(f"TIME BREAKDOWN", flush=True)
+    print(f"{'='*80}", flush=True)
+    print(f"Phase 1 (find_similar): {time_phase1 - time_start:.1f}s", flush=True)
+    print(f"Phase 2A (hypothesis): {time_phase2a - time_phase1:.1f}s", flush=True)
+    print(f"Phase 2B (validation): {time_phase2b - time_phase2a:.1f}s", flush=True)
+    print(f"Phase 2C (code gen): {time_phase2c - time_phase2b:.1f}s", flush=True)
+    print(f"Code execution: {time_execution - time_phase2c:.1f}s", flush=True)
+    print(f"Total: {time_execution - time_start:.1f}s", flush=True)
+    print(f"\n{'='*80}", flush=True)
+    print(f"RESULTS", flush=True)
+    print(f"{'='*80}", flush=True)
+    print(f"Successful: {successful}/{len(tasks_data)} ({100*successful/len(tasks_data):.1f}%)", flush=True)
+    print(f"Average score: {total_score/len(tasks_data):.2f}", flush=True)
+    print(f"{'='*80}\n", flush=True)
+
     return results
 
 
@@ -590,7 +594,7 @@ def main():
         max_tokens=16384,
         max_retries=3,
         save_prompts=False,
-        prompt_log_dir="prompts_old_dsl"#TODO change prompt log dir
+        prompt_log_dir="prompts_new_dsl"#TODO change prompt log dir
     )
     vlm_config_phase2 = VLMConfig(
         api_key=api_key,
@@ -608,18 +612,18 @@ def main():
     library = ProgramLibrary()
     
     results = process_directory(
-        data_dir='data_v1/eval_size_10',#TODO change data dir
+        data_dir='data_v2/evaluation',#TODO change data dir
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,
         library=library,
         timeout=2,
         max_find_similar_workers= 56,
-        log_dir="logs_old_dsl",#TODO change log dir
-        verbose=False
+        log_dir="logs_new_dsl",#TODO change log dir
+        verbose=True
     )
     
-    save_results(results, output_dir='results/old_dsl')#TODO change result dir
+    save_results(results, output_dir='results/new_dsl')#TODO change result dir
 
 
 if __name__ == "__main__":

@@ -320,15 +320,17 @@ class ProgramLibrary:
                     train_examples: List[Dict[str, Any]], 
                     top_k: int = 3,
                     min_similarity: float = 0.0,
+                    n_workers: int = None,
                     timeout: int = 2,
                     verbose: bool = False) -> List[Dict]:
         """
-        Find programs based on execution similarity.
+        Find programs based on execution similarity (parallelized).
         
         Args:
             train_examples: Training examples to test against
             top_k: Number of top programs to return
             min_similarity: Minimum similarity threshold
+            n_workers: Number of parallel workers (default: CPU count - 4)
             timeout: Timeout per program execution in seconds
         
         Returns:
@@ -341,14 +343,18 @@ class ProgramLibrary:
             print(f"min_similarity threshold: {min_similarity}", flush=True)
             print(f"top_k: {top_k}", flush=True)
         
-        if not train_examples and verbose:
+        if not train_examples:
             print("WARNING: No train examples provided!", flush=True)
             return []
         
+        # Determine number of workers
+        if n_workers is None:
+            cpu_count = mp.cpu_count()
+            n_workers = max(1, cpu_count - 8)  # Leave some CPUs free
         if verbose:
-            print(f"Running sequential evaluation (timeout: {timeout}s per program)", flush=True)
+            print(f"Using {n_workers} parallel workers (timeout: {timeout}s per program)", flush=True)
         
-        # Prepare program data for processing
+        # Prepare program data for parallel processing
         prog_data_list = [
             (prog['task_id'], prog['solve_func'], prog['functions'])
             for prog in self.programs
@@ -359,49 +365,65 @@ class ProgramLibrary:
         all_results = []  # Track all results for debugging
         
         start_time = time.time()
-        completed = 0
-        failed = 0
         
-        # Process programs sequentially
-        for idx, prog_data in enumerate(prog_data_list):
-            completed += 1
+        # Use ProcessPoolExecutor for true parallelism
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+            # Create partial function with fixed arguments
+            eval_func = partial(
+                evaluate_single_program,
+                train_examples=train_examples,
+                min_similarity=min_similarity,
+                timeout=timeout
+            )
             
-            # Progress update every 50 programs
-            if completed % 50 == 0 or completed == len(self.programs) and verbose:
-                elapsed = time.time() - start_time
-                rate = completed / elapsed if elapsed > 0 else 0
-                print(f"Progress: {completed}/{len(self.programs)} programs ({rate:.1f}/s, {elapsed:.1f}s elapsed)", flush=True)
+            # Submit all tasks
+            future_to_idx = {
+                executor.submit(eval_func, prog_data): idx 
+                for idx, prog_data in enumerate(prog_data_list)
+            }
             
-            try:
-                result = evaluate_single_program(
-                    prog_data,
-                    train_examples=train_examples,
-                    min_similarity=min_similarity,
-                    timeout=timeout
-                )
+            # Process results as they complete
+            completed = 0
+            failed = 0
+            
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                completed += 1
                 
-                if result is not None:
-                    all_results.append(result)
+                # Progress update every 50 programs
+                if completed % 50 == 0 or completed == len(self.programs):
+                    elapsed = time.time() - start_time
+                    rate = completed / elapsed if elapsed > 0 else 0
+                    print(f"Progress: {completed}/{len(self.programs)} programs ({rate:.1f}/s, {elapsed:.1f}s elapsed)", flush=True)
+                
+                try:
+                    result = future.result(timeout=timeout + 1)  # Slightly longer than execution timeout
                     
-                    if result['above_threshold']:
-                        if result['has_perfect_example']:
-                            perfect_programs.append(result)
-                        else:
-                            other_programs.append(result)
+                    if result is not None:
+                        all_results.append(result)
+                        
+                        if result['above_threshold']:
+                            if result['has_perfect_example']:
+                                perfect_programs.append(result)
+                            else:
+                                other_programs.append(result)
                             
-            except Exception as e:
-                failed += 1
-                if failed <= 5:  # Only log first few errors
-                    print(f"WARNING: Program {idx} ({prog_data[0]}) failed: {e}", flush=True)
+                except concurrent.futures.TimeoutError:
+                    failed += 1
+                    if failed <= 5:  # Only log first few
+                        print(f"WARNING: Program {idx} ({prog_data_list[idx][0]}) timed out", flush=True)
+                except Exception as e:
+                    failed += 1
+                    if failed <= 5:  # Only log first few errors
+                        print(f"WARNING: Program {idx} ({prog_data_list[idx][0]}) failed: {e}", flush=True)
         
-        if verbose:
-            total_time = time.time() - start_time
-            print(f"\nEvaluation complete: {completed}/{len(self.programs)} programs in {total_time:.1f}s", flush=True)
-            if failed > 0:
-                print(f"Failed/timed out: {failed} programs", flush=True)
+        total_time = time.time() - start_time
+        print(f"\nEvaluation complete: {completed}/{len(self.programs)} programs in {total_time:.1f}s", flush=True)
+        if failed > 0:
+            print(f"Failed/timed out: {failed} programs", flush=True)
         
         # DEBUGGING: Show statistics about all results
-        if len(all_results) > 0 and verbose:
+        if len(all_results) > 0:
             error_counts = sum(1 for r in all_results if r['errors'] > 0)
             max_sim = max((r['similarity'] for r in all_results), default=0.0)
             avg_sim = sum(r['similarity'] for r in all_results) / len(all_results)
@@ -428,24 +450,24 @@ class ProgramLibrary:
         perfect_programs.sort(key=lambda x: x['similarity'], reverse=True)
         other_programs.sort(key=lambda x: x['similarity'], reverse=True)
         
-        if verbose:
-            print(f"\n=== Results ===", flush=True)
-            print(f"Programs with perfect examples: {len(perfect_programs)}", flush=True)
-            print(f"Other programs above threshold: {len(other_programs)}", flush=True)
+        print(f"\n=== Results ===", flush=True)
+        print(f"Programs with perfect examples: {len(perfect_programs)}", flush=True)
+        print(f"Other programs above threshold: {len(other_programs)}", flush=True)
         
         # Return all perfect programs + top_k others
         if perfect_programs:
             result = perfect_programs + other_programs[:top_k]
         else:
             result = other_programs[:top_k]
-        if verbose:
-            print(f"Returning {len(result)} programs", flush=True)
-            if len(result) > 0:
-                print(f"Top program: {result[0]['task_id']} (sim: {result[0]['similarity']:.3f})", flush=True)
-                if len(result) > 1:
-                    print(f"Second program: {result[1]['task_id']} (sim: {result[1]['similarity']:.3f})", flush=True)
+        
+        print(f"Returning {len(result)} programs", flush=True)
+        if len(result) > 0:
+            print(f"Top program: {result[0]['task_id']} (sim: {result[0]['similarity']:.3f})", flush=True)
+            if len(result) > 1:
+                print(f"Second program: {result[1]['task_id']} (sim: {result[1]['similarity']:.3f})", flush=True)
         
         return result
+    
     def test_program(self, 
                     solve_func, 
                     train_examples: List[Dict[str, Any]],

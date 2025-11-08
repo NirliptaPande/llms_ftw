@@ -191,11 +191,11 @@ If it doesn't fit perfectly, identify what needs to be refined.
                 "type": "text",
                 "text": self.few_shot_examples
             })
-        else:
-            content_blocks.append({
-                "type": "text",
-                "text": "Generate the `solve(I)` function now.\n"
-            })
+            
+        content_blocks.append({
+            "type": "text",
+            "text": "Generate the `solve(I)` function now.\n"
+        })
         
         return content_blocks
     
@@ -1015,5 +1015,4 @@ def solve_b782dc8a(I):
 ```
 
 ---------------------------
-Now you need to solve the following Task:
     """

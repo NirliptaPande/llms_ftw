@@ -8,6 +8,8 @@ Pipeline: Sequential phases per task, parallelized across tasks
 
 import re
 import json
+import random
+import inspect
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,7 +83,7 @@ def test_program(program_code: str, task: Dict) -> Tuple[float, List[Tuple[Any, 
         scores = []
         results = []
         
-        for example in task['test']:
+        for example in task['train']: #TODO: change back to 'test' for final eval
             inp = example['input']
             expected = example['output']
             if isinstance(inp, list):
@@ -241,49 +243,53 @@ Combat this by evolving your hypothesis as you see each training example."""
         
         # Extract hypothesis from phase2a_output
         hypothesis = extract_hypothesis_from_response(phase2a_output)
-        
-        # ====================================================================
-        # PHASE 2B: Hypothesis Validation (Training + Test)
-        # ====================================================================
-        phase2b_prompt = prompter.build_phase2b_prompt(
-            task,
-            hypothesis,
-            phase1_result.similar_programs
-        )
-        
-        phase2b_output = vlm_client_phase1.query(
-            phase2b_prompt,
-            system_prompt="""You are an expert at analyzing ARC puzzles and discovering transformation patterns.
 
-You are given an initial hypothesis about the puzzle. If the hypothesis doesn't extend to the test input while explaining the training examples, refine it to create a more accurate pattern description.
-Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple transformation that applies to all samples, both training and test.
-Combat this by evolving your hypothesis"""
-        )
-        
-        # Log Phase 2B output
-        phase2b_log_path = os.path.join(log_dir, f"{task_id}_phase2b_validation.txt")
-        with open(phase2b_log_path, 'w', encoding='utf-8') as f:
-            f.write(f"Task ID: {task_id}\n")
-            f.write("="*80 + "\n")
-            f.write("PHASE 2B: HYPOTHESIS VALIDATION (TRAINING + TEST)\n")
-            f.write("="*80 + "\n\n")
-            f.write("INITIAL HYPOTHESIS:\n")
-            f.write("-"*80 + "\n")
-            f.write(hypothesis + "\n")
-            f.write("-"*80 + "\n\n")
-            f.write("VALIDATION OUTPUT:\n")
-            f.write("-"*80 + "\n")
-            f.write(phase2b_output)
-        
-        # Extract validated pattern from phase2b_output
-        validated_pattern = extract_validated_pattern_from_response(phase2b_output)
-        
+        # # ====================================================================
+        # # PHASE 2B: Hypothesis Validation (Training + Test)
+        # # ====================================================================
+        # phase2b_prompt = prompter.build_phase2b_prompt(
+        #     task,
+        #     hypothesis,
+        #     phase1_result.similar_programs
+        # )
+        #
+        # phase2b_output = vlm_client_phase1.query(
+        #     phase2b_prompt,
+        #     system_prompt="""You are an expert at analyzing ARC puzzles and discovering transformation patterns.
+        #
+        # You are given an initial hypothesis about the puzzle. If the hypothesis doesn't extend to the test input while explaining the training examples, refine it to create a more accurate pattern description.
+        # Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple transformation that applies to all samples, both training and test.
+        # Combat this by evolving your hypothesis"""
+        # )
+        #
+        # # Log Phase 2B output
+        # phase2b_log_path = os.path.join(log_dir, f"{task_id}_phase2b_validation.txt")
+        # with open(phase2b_log_path, 'w', encoding='utf-8') as f:
+        #     f.write(f"Task ID: {task_id}\n")
+        #     f.write("="*80 + "\n")
+        #     f.write("PHASE 2B: HYPOTHESIS VALIDATION (TRAINING + TEST)\n")
+        #     f.write("="*80 + "\n\n")
+        #     f.write("INITIAL HYPOTHESIS:\n")
+        #     f.write("-"*80 + "\n")
+        #     f.write(hypothesis + "\n")
+        #     f.write("-"*80 + "\n\n")
+        #     f.write("VALIDATION OUTPUT:\n")
+        #     f.write("-"*80 + "\n")
+        #     f.write(phase2b_output)
+        #
+        # # Extract validated pattern from phase2b_output
+        # validated_pattern = extract_validated_pattern_from_response(phase2b_output)
+
+        # Skip Phase 2B - use hypothesis directly from Phase 2A
+        phase2b_output = None
+        validated_pattern = hypothesis
+
         # ====================================================================
         # PHASE 2C: Code Generation
         # ====================================================================
         phase2c_prompt = prompter.build_phase2c_prompt(
-            task, 
-            validated_pattern,  # Use validated pattern
+            task,
+            validated_pattern,  # Use hypothesis directly from Phase 2A
             phase1_result.similar_programs
         )
         
@@ -689,7 +695,7 @@ def main():
     
     # Run simplified pipeline
     results = process_directory(
-        data_dir='data_v1/eval_size_10',#TODO change dir if needed
+        data_dir='data_v2/overfit_23',#TODO change dir if needed
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,

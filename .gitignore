@@ -4,10 +4,11 @@
 __pycache__/
 library_cache.json
 /data_v2
-/logs
 /results
-/testing_run.err
-/testing_run.out
+/*.err
+/*.out
 /testing.slurm
 .vscode/
 src/results
+/logs*
+/prompts_testing

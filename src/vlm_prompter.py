@@ -1,24 +1,26 @@
 """
-Refactored VLM Prompter for ARC DSL-based solver.
-New pipeline: Program Similarity → Pattern Discovery → Code Generation
+Refactored VLM Prompter for ARC DSL-based solver with image support.
+New pipeline: Program Similarity → Pattern Discovery (2 phases) → Code Generation
 """
 
 from typing import List, Tuple, Dict, Any
+import numpy as np
+from utils.render_legacy import grid_to_base64_png_oai_content
 
 
 class VLMPrompter:
     """Builds prompts for the program-first ARC solving process"""
     
     def __init__(self):
-        self.phase1_template = self._load_phase1_template()
-        self.phase2_template = self._load_phase2_template()
+        self.phase2a_template = self._load_phase2a_template()
+        self.phase2b_template = self._load_phase2b_template()
+        self.phase2c_dsl_section = self._get_phase2c_dsl_section()
     
-    def build_phase1_prompt(self, 
-                           task: Dict[str, Any],
-                           similar_programs: List[Dict[str, Any]] = None) -> str:
+    def build_phase2a_prompt(self, 
+                             task: Dict[str, Any],
+                             similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Build Phase 1 prompt: Natural Language Pattern Discovery
-        Analyzes training examples AND similar programs to discover transformation pattern.
+        Build Phase 2A prompt: Hypothesis Formation from Training Only.
         
         Args:
             task: Dict with 'train' key containing list of {'input': grid, 'output': grid}
@@ -26,110 +28,270 @@ class VLMPrompter:
                              Each dict has: {'program': str, 'similarity': float, 'task_id': str}
             
         Returns:
-            Complete prompt string for natural language pattern analysis
+            List of content blocks (dicts) for multimodal prompt
         """
-        # Format training examples
-        examples_str = self._format_training_examples(task['train'])
+        content_blocks = []
         
-        # Format similar programs
+        # Add header
+        content_blocks.append({
+            "type": "text",
+            "text": "## Training Examples\n"
+        })
+        
+        # Format training examples ONLY (with images)
+        content_blocks.extend(self._format_training_examples(task['train']))
+        
+        # Add similar programs section
+        content_blocks.append({
+            "type": "text",
+            "text": "\n## Similar Programs from Library\n"
+        })
+        
         if similar_programs:
-            similar_str = self._format_similar_programs_for_phase1(similar_programs)
+            similar_str = self._format_similar_programs(similar_programs)
         else:
             similar_str = "[No similar programs found in library]"
         
-        # Insert into template
-        prompt = self.phase1_template.replace('[INSERT TASK EXAMPLES HERE]', examples_str)
-        prompt = prompt.replace('[INSERT SIMILAR PROGRAMS HERE]', similar_str)
+        content_blocks.append({
+            "type": "text",
+            "text": similar_str
+        })
         
-        return prompt
+        # Add the analysis protocol template (hypothesis formation)
+        content_blocks.append({
+            "type": "text",
+            "text": self.phase2a_template
+        })
+        
+        return content_blocks
     
-    def build_phase2_prompt(self,
-                            task: Dict[str, Any], 
-                           phase1_output: str,
-                           similar_programs: List[Dict[str, Any]] = None) -> str:
+    def build_phase2b_prompt(self,
+                             task: Dict[str, Any],
+                             hypothesis: str,
+                             similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Build Phase 2 prompt: Code Generation
-        Generates solve() function based on natural language pattern and similar programs.
+        Build Phase 2B prompt: Hypothesis Validation with Training + Test.
         
         Args:
-            phase1_output: The natural language pattern description from Phase 1
+            task: Dict with 'train' and 'test' keys
+            hypothesis: The hypothesis from Phase 2A
+            similar_programs: List of similar programs from library
+            
+        Returns:
+            List of content blocks for multimodal prompt
+        """
+        content_blocks = []
+        
+        # Add the initial hypothesis
+        content_blocks.append({
+            "type": "text",
+            "text": f"""## Initial Hypothesis
+
+{hypothesis}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## All Examples (Test + Train)
+
+Your task: Test if this hypothesis works for test examples and train input output pairs below.
+If it doesn't fit perfectly, identify what needs to be refined.
+
+"""
+        })
+        content_blocks.append({
+            "type": "text",
+            "text": "\n### Test Examples (inputs only)\n"
+        })
+        content_blocks.extend(self._format_test_examples(task['test'], include_images=True))
+        
+        # Show ALL examples now (training + test)
+        content_blocks.append({
+            "type": "text",
+            "text": "### Training Examples\n"
+        })
+        content_blocks.extend(self._format_training_examples(task['train'], include_images=True))
+        
+
+        
+        # Add validation template
+        content_blocks.append({
+            "type": "text",
+            "text": self.phase2b_template
+        })
+        
+        return content_blocks
+    
+    def build_phase2c_prompt(self,
+                             task: Dict[str, Any], 
+                             validated_pattern: str,
+                             similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Build Phase 2C prompt: Code Generation from Validated Pattern.
+        This matches the original build_phase2_prompt structure exactly.
+        
+        Args:
+            task: Dict with 'train' and 'test' keys
+            validated_pattern: The validated pattern description from Phase 2B
             similar_programs: Same list of similar programs (for reference during coding)
             
         Returns:
-            Complete prompt string for code generation
+            List of content blocks (dicts) for multimodal prompt
         """
-        # Format training examples
-        examples_str = self._format_training_examples(task['train'])
-        prompt = self.phase2_template.replace('[INSERT TASK EXAMPLES HERE]', examples_str)
-        # Extract the key sections from Phase 1 output
-        extracted_pattern = self._extract_key_pattern_from_phase1(phase1_output)
+        content_blocks = []
         
-        # Insert extracted pattern
-        prompt = self.phase2_template.replace('[PHASE 1 PATTERN DESCRIPTION]', extracted_pattern)
+        # Add header (same as original)
+        content_blocks.append({
+            "type": "text",
+            "text": "# DSL Code Generator\nGenerate a Python `solve(I)` function using ONLY the DSL primitives below.\n\n"
+        })
         
-        # Insert similar programs if available
+        # Add training examples section (same as original)
+        content_blocks.append({
+            "type": "text",
+            "text": "## Training Examples\n"
+        })
+        
+        # Format training examples (with images)
+        content_blocks.extend(self._format_training_examples(task['train'], include_images=True))
+        
+        # Format test examples (input only, no output)
+        content_blocks.extend(self._format_test_examples(task['test'], include_images=True))
+        
+        # Add pattern description (using validated pattern instead of extracting from phase1)
+        content_blocks.append({
+            "type": "text",
+            "text": f"\n## Natural Language Pattern Description\n{validated_pattern}\n"
+        })
+        
+        # Add similar programs section (same as original)
+        content_blocks.append({
+            "type": "text",
+            "text": "\n## Similar Programs for Reference\nThe following programs solved similar tasks and may provide useful patterns or approaches:\n\n"
+        })
+        
         if similar_programs:
-            similar_str = self._format_similar_programs_for_phase2(similar_programs)
+            similar_str = self._format_similar_programs(similar_programs)
         else:
             similar_str = "[No similar programs available for reference]"
         
-        prompt = prompt.replace('[SIMILAR PROGRAMS FOR REFERENCE]', similar_str)
+        content_blocks.append({
+            "type": "text",
+            "text": similar_str
+        })
         
-        return prompt
+        # Add DSL primitives and the rest of the template (same as original)
+        content_blocks.append({
+            "type": "text",
+            "text": self.phase2c_dsl_section
+        })
+        
+        return content_blocks
     
-    def _extract_key_pattern_from_phase1(self, phase1_output: str) -> str:
-        """
-        Extract the most relevant sections from Phase 1 for Phase 2.
-        Focuses on the final transformation rule and decision.
-        """
-        sections = []
+    def _format_test_examples(self, test_examples: List[Dict[str, Any]], include_images: bool = True) -> List[Dict[str, Any]]:
+        """Format test examples as content blocks with images (input only, no output)"""
+        content_blocks = []
         
-        # Try to extract STEP 6: Final Transformation Rule
-        if "### STEP 6: Final Transformation Rule" in phase1_output:
-            step6_start = phase1_output.find("### STEP 6: Final Transformation Rule")
-            step6_end = phase1_output.find("━━━━━━━━━━", step6_start + 1)
-            if step6_end == -1:
-                step6_end = len(phase1_output)
-            sections.append(phase1_output[step6_start:step6_end].strip())
+        # Header
+        content_blocks.append({
+            "type": "text",
+            "text": f"\n{'='*60}\nTEST EXAMPLES (to solve)\n{'='*60}\n"
+        })
         
-        # Try to extract STEP 5: Lock-in Checkpoint (the decision)
-        if "**Decision:**" in phase1_output:
-            decision_start = phase1_output.find("**Decision:**")
-            decision_end = phase1_output.find("\n\n", decision_start)
-            if decision_end == -1:
-                decision_end = phase1_output.find("━━━━━━━━━━", decision_start)
-            if decision_end != -1:
-                sections.append(phase1_output[decision_start:decision_end].strip())
+        content_blocks.append({
+            "type": "text",
+            "text": f"Below are {len(test_examples)} test example(s) you need to solve:\nFor each test example, only the input grid is provided. You must determine the output.\n"
+        })
         
-        # If we got specific sections, use them
-        if sections:
-            return "\n\n".join(sections)
+        for idx, example in enumerate(test_examples, 1):
+            # Test example header
+            content_blocks.append({
+                "type": "text",
+                "text": f"\nTest Example {idx}:\n"
+            })
+            
+            # Input section
+            content_blocks.append({
+                "type": "text",
+                "text": "Input:\n"
+            })
+            
+            # Input image - conditional
+            if include_images:
+                input_grid = np.array(example['input'])
+                content_blocks.append(grid_to_base64_png_oai_content(input_grid))
+            
+            # Input ASCII
+            content_blocks.append({
+                "type": "text",
+                "text": f"\nASCII representation:\n{self._format_grid(example['input'], separator='|')}\n"
+            })
+            
+            # Placeholder for output
+            content_blocks.append({
+                "type": "text",
+                "text": "\nOutput: [TO BE DETERMINED]\n"
+            })
         
-        # Fallback: use the entire output
-        return phase1_output
-    
-    def _format_training_examples(self, train_examples: List[Dict[str, Any]]) -> str:
-        """Format training examples for display"""
-        lines = []
+        return content_blocks
+
+    def _format_training_examples(self, train_examples: List[Dict[str, Any]], include_images: bool = True) -> List[Dict[str, Any]]:
+        """Format training examples as content blocks with images"""
+        content_blocks = []
+        content_blocks.append({
+            "type": "text",
+            "text": f"Below are {len(train_examples)} training example(s):\nFor each example, the input grid is shown first, followed by the output grid.\n"
+        })
         
         for idx, example in enumerate(train_examples, 1):
-            lines.append(f"Example {idx}:")
-            lines.append("Input:")
-            lines.append(self._format_grid(example['input']))
-            lines.append("Output:")
-            lines.append(self._format_grid(example['output']))
-            lines.append("")
+            # Example header
+            content_blocks.append({
+                "type": "text",
+                "text": f"\nExample {idx}:\n"
+            })
+            
+            # Input section
+            content_blocks.append({
+                "type": "text",
+                "text": "Input:\n"
+            })
+            
+            # Input image - conditional
+            if include_images:
+                input_grid = np.array(example['input'])
+                content_blocks.append(grid_to_base64_png_oai_content(input_grid))
+            
+            # Input ASCII (optional, for reference)
+            content_blocks.append({
+                "type": "text",
+                "text": f"\nASCII representation:\n{self._format_grid(example['input'], separator='|')}\n"
+            })
+            
+            # Output section
+            content_blocks.append({
+                "type": "text",
+                "text": "\nOutput:\n"
+            })
+            
+            # Output image - conditional
+            if include_images:
+                output_grid = np.array(example['output'])
+                content_blocks.append(grid_to_base64_png_oai_content(output_grid))
+            
+            # Output ASCII (optional, for reference)
+            content_blocks.append({
+                "type": "text",
+                "text": f"\nASCII representation:\n{self._format_grid(example['output'], separator='|')}\n"
+            })
         
-        return "\n".join(lines)
+        return content_blocks   
     
-    def _format_grid(self, grid: Tuple[Tuple[int]]) -> str:
-        """Format grid as readable ASCII"""
-        return "\n".join("".join(str(cell) for cell in row) for row in grid)
+    def _format_grid(self, grid: Tuple[Tuple[int]], separator: str = "|") -> str:
+        return "\n".join(separator.join(str(cell) for cell in row) for row in grid)
     
-    def _format_similar_programs_for_phase1(self, similar_programs: List[Dict[str, Any]]) -> str:
-        """Format similar programs for Phase 1 (natural language discovery)"""
+    def _format_similar_programs(self, similar_programs: List[Dict[str, Any]]) -> str:
+        """Format similar programs for pattern discovery and code generation"""
         lines = []
-        lines.append("The following programs from the library solved similar tasks:\n")
+        lines.append("The following programs may be useful to solve the current task, feel free to use parts of each program, and/or combine them. Most importantly, use them as guidance:\n")
         
         for idx, prog in enumerate(similar_programs, 1):
             similarity = prog.get('similarity', 0.0)
@@ -144,242 +306,125 @@ class VLMPrompter:
         
         return "\n".join(lines)
     
-    def _format_similar_programs_for_phase2(self, similar_programs: List[Dict[str, Any]]) -> str:
-        """Format similar programs for Phase 2 (code generation reference)"""
-        lines = []
-        
-        for idx, prog in enumerate(similar_programs, 1):
-            similarity = prog.get('similarity', 0.0)
-            program_code = prog.get('program', '')
-            task_id = prog.get('task_id', 'unknown')
-            
-            lines.append(f"```python")
-            lines.append(f"# Similar program {idx} (similarity: {similarity:.2f}, task: {task_id})")
-            lines.append(program_code)
-            lines.append("```")
-            lines.append("")
-        
-        return "\n".join(lines)
-    
-    def _load_phase1_template(self) -> str:
-        return r"""## Training Examples
-[INSERT TASK EXAMPLES HERE]
-
-## Similar Programs from Library
-[INSERT SIMILAR PROGRAMS HERE]
-
+    def _load_phase2a_template(self) -> str:
+        """Template for hypothesis formation (training only)"""
+        return r"""
 ## Analysis Protocol
 
-You will analyze these examples systematically, allowing your hypothesis to evolve 
-naturally as you see more data - like a human solving a puzzle.
+You will analyze the examples systematically, allowing your hypothesis to evolve naturally as you see more data - like a human solving a puzzle.
 
-**Core principle:** Look for DIFFERENCES within each example (input→output changes) 
-and SIMILARITIES across all examples (the consistent pattern).
+**Core principle:** Look for DIFFERENCES within each example (input→output changes) and SIMILARITIES across all examples (the consistent pattern).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-### STEP 1: First Observations & Comparison
+Work through examples sequentially, reasoning in simple English about what you observe.
 
-For each example, describe what you see (objects, not pixels):
+**Step 1: First Example Analysis**
+Given: Input 1 → Output 1
 
-**Example 1:**
-- Input: [objects, colors, spatial layout]
-- Output: [objects, colors, spatial layout]
-- What CHANGES: [list differences]
-- What STAYS SAME: [list constants]
+<observation_1>
+Describe what you see:
+- What's the size/shape change?
+- What colors changed? 
+- What geometric transformations occurred?
+- What patterns do you notice?
+</observation_1>
 
-**Example 2:**
-- Input: [objects, colors, spatial layout]
-- Output: [objects, colors, spatial layout]
-- What CHANGES: [list differences]
-- What STAYS SAME: [list constants]
+<hypothesis_1>
+State your initial guess about the transformation rule in natural language.
+Example: "The grid appears to be flipped horizontally"
+</hypothesis_1>
 
-**Example 3:**
-- Input: [objects, colors, spatial layout]
-- Output: [objects, colors, spatial layout]
-- What CHANGES: [list differences]
-- What STAYS SAME: [list constants]
+**Step 2: Second Example Validation**
+Given: Input 2 → Output 2
 
-**Comparison Matrix** (find patterns):
+<observation_2>
+- Does your hypothesis from Example 1 still hold?
+- What's similar to Example 1? 
+- What's different from Example 1?
+</observation_2>
 
-| Feature | Ex1 | Ex2 | Ex3 | Pattern? |
-|---------|-----|-----|-----|----------|
-| # input objects | | | | [Varies / Always X / ...] |
-| # output objects | | | | [Pattern description] |
-| Grid size changes? | | | | [Y/N and how] |
-| Colors preserved? | | | | [Pattern description] |
-| Spatial relationship | | | | [Pattern description] |
-| [Add custom rows] | | | | |
+<hypothesis_2>
+Refine your hypothesis:
+- If it still works: Confirm and strengthen
+- If it breaks: Revise with a more general pattern
+Example: "Actually, it's mirrored horizontally, THEN the original is stacked on top"
+</hypothesis_2>
 
-**Key similarities across ALL examples:**
-[What is CONSISTENT in all transformations?]
+**Step 3: Third Example Confirmation**
+Given: Input 3 → Output 3
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<observation_3>
+- Does hypothesis_2 work here?
+- Any new edge cases or variations?
+</observation_3>
 
-### STEP 2: Hypothesis Evolution Through Examples
+<hypothesis_3>
+Final refined hypothesis in natural language.
+</hypothesis_3>
 
-**From Example 1:**
-Initial hypothesis: [Describe transformation as object/action sequence]
-Confidence: Low/Medium/High - [Why?]
+**Step N: Additional Examples**
+Continue for all remaining examples...
 
-**Testing on Example 2:**
-Does initial hypothesis explain Example 2? ✓ / ✗
-- If ✗: What's wrong or missing?
-- If ✓: What additional details does Example 2 reveal?
+**Final Step: Pattern Synthesis**
+<pattern_summary>
+In plain English, the transformation rule is:
+- [Short description of relevant observations]
+- [First operation in natural language]
+- [Second operation in natural language]
+- [Any conditions or special cases]
 
-Evolved hypothesis: [Refined transformation description]
-Confidence: Low/Medium/High - [Why?]
+Edge cases to consider:
+- [Any variations you noticed]
 
-**Testing on Example 3:**
-Does evolved hypothesis explain Example 3? ✓ / ✗
-- If ✗: What's wrong or missing?
-- If ✓: What additional constraints does Example 3 reveal?
+Why this works:
+- [Brief explanation about WHY this pattern makes sense]
 
-Refined hypothesis: [Final refined transformation description]
-Confidence: Low/Medium/High - [Why?]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-### STEP 3: Similar Programs Analysis
-
-**Review the library programs** (shown above with similarity scores):
-
-For each similar program:
-- Task ID: [X] - Similarity: [score]
-- What transformation does it do? [describe in object/action terms]
-- WHY might it be similar? [what execution pattern is shared?]
-- Does it suggest anything about your hypothesis? [insights]
-
-**Important:** High similarity ≠ same logic. These may solve DIFFERENT patterns 
-that happen to produce similar input/output relationships. Use as inspiration, 
-not as a template.
-
-**Key insight from similar programs:**
-[Do they suggest your hypothesis, an alternative, or something you missed?]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-### STEP 4: Generate Alternative Hypotheses
-
-Now generate at least 2 alternatives that ALSO explain all examples but use 
-different reasoning:
-
-**Primary (evolved from Steps 1-2):** 
-[Your refined hypothesis]
-
-**Alternative A:** 
-[Different object/action interpretation]
-- Why it could work: [evidence from examples]
-- Why it might be better/worse than primary: [reasoning]
-- Key difference from primary: [what's fundamentally different?]
-
-**Alternative B:** 
-[Another different interpretation]
-- Why it could work: [evidence from examples]
-- Why it might be better/worse than primary: [reasoning]
-- Key difference from primary: [what's fundamentally different?]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-### STEP 5: Lock-in Checkpoint ⚠️ (where you usually fail)
-
-Before committing, force these checks:
-
-**A. Evolution check:**
-Looking back at Steps 1-2, did you genuinely evolve your hypothesis based on 
-new evidence, or did you rationalize away problems to keep your first guess?
-
-Red flags: "it mostly works", "except for this one case", "basically the same"
-
-Honest assessment: [Did I force-fit? Y/N and why]
-
-**B. Alternative comparison:**
-Test each hypothesis fairly:
-
-| Hypothesis | Ex1 Match | Ex2 Match | Ex3 Match | # Special Cases | Simplicity |
-|------------|-----------|-----------|-----------|-----------------|------------|
-| Primary | ✓/✗ | ✓/✗ | ✓/✗ | [count] | [1-5] |
-| Alternative A | ✓/✗ | ✓/✗ | ✓/✗ | [count] | [1-5] |
-| Alternative B | ✓/✗ | ✓/✗ | ✓/✗ | [count] | [1-5] |
-
-**C. Confidence breakdown:**
-Rate your confidence on different aspects:
-
-- Pattern explains Example 1: [Low/Med/High] - [Why?]
-- Pattern explains Example 2: [Low/Med/High] - [Why?]
-- Pattern explains Example 3: [Low/Med/High] - [Why?]
-- Pattern is simple/intuitive: [Low/Med/High] - [Why?]
-- Pattern captures ALL similarities: [Low/Med/High] - [Why?]
-
-Overall confidence: [X%]
-What would increase confidence: [what evidence/test?]
-What would decrease confidence: [what would disprove it?]
-
-**D. Similarity verification:**
-Does your chosen hypothesis explain:
-- The DIFFERENCES within each example? ✓ / ✗
-- The SIMILARITIES across all examples? ✓ / ✗
-
-The core pattern across all examples is: [state it clearly]
-My hypothesis captures this because: [explain connection]
-
-**E. Simplicity test:**
-Explain your hypothesis in ONE sentence (like explaining to a friend):
-[State it]
-
-If this explanation is convoluted or has many "except when" clauses, 
-it's probably wrong.
-
-**F. Disconfirming evidence hunt:**
-Actively search for evidence AGAINST your primary hypothesis:
-- What doesn't quite fit? [list]
-- What should be there but isn't? [list]
-- Which example fits least well? [Example X because...]
-
-**Decision:** Stick with primary or switch to alternative? 
-[Choice] because [specific reasoning based on checks A-F]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-### STEP 6: Final Transformation Rule
-
-**Pattern:** [1-2 sentence description in object/action language]
-
-**Reasoning:**
-[Explain WHY this pattern makes sense - what's the underlying logic?]
-
-**Step-by-step process:**
-1. [First: what to identify/find]
-2. [Second: what action to perform]
-3. [Third: how to produce output]
-[Add more steps if needed for multi-stage transformations]
-
-**Conditions/Constraints:** 
-[Any "if-then" rules or special cases: "if X then Y, otherwise Z"]
-
-**Why this works:**
-[Brief explanation of why this pattern explains all examples and their similarities]
+Confidence level: [0-100%]
+</pattern_summary>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Begin your analysis:"""
     
-    def _load_phase2_template(self) -> str:
-        """Phase 2: Code Generator Template"""
-        return """# DSL Code Generator
-Generate a Python `solve(I)` function using ONLY the DSL primitives below.
+    def _load_phase2b_template(self) -> str:
+        """Template for hypothesis validation (all examples)"""
+        return r"""
+## Validation Protocol
 
-## Training Examples
-[INSERT TASK EXAMPLES HERE]
+Check if the initial hypothesis fits ALL examples (training + test inputs).
+Your goal: Confirm the hypothesis or refine it as needed.
 
-## Natural Language Pattern Description
-[PHASE 1 PATTERN DESCRIPTION]
+**For each test input:**
+<test_check_N>
+Does the hypothesis make sense for Test Input N?
+- Consider: size, colors, patterns, edge cases
+- Any concerns or refinements needed?
+</test_check_N>
 
-## Similar Programs for Reference
-The following programs solved similar tasks and may provide useful patterns or approaches:
+Does it explain all the test and training examples perfectly?
 
-[SIMILAR PROGRAMS FOR REFERENCE]
+**Final Validation:**
+<validated_pattern>
+After checking all examples:
 
+**Status:** [CONFIRMED / NEEDS REFINEMENT]
+
+**Final Pattern Description:**
+[If confirmed: restate the pattern cleanly]
+[If refined: provide the improved pattern with explanations of what changed]
+
+**Confidence:** [0-100%]
+
+**Reasoning:** [Why this pattern works for all examples]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Begin validation:"""
+    
+    def _get_phase2c_dsl_section(self) -> str:
+        """Phase 2C: DSL Primitives and Code Generation Instructions (EXACT copy from original)"""
+        return """
 ## DSL Primitives
 
 **Type Definitions:**
@@ -394,171 +439,180 @@ Callable: Function type
 
 **Functional Programming:**
 ```python
-compose(f, g) -> Callable                    # f(g(x)) - function composition
-chain(f, g, h, ...) -> Callable              # f(g(h(...(x)))) - chain multiple functions
-fork(combiner, f, g) -> Callable             # combiner(f(x), g(x)) - apply two functions and combine
-apply(f, container) -> Container             # apply f to each element
-mapply(f, container) -> FrozenSet            # apply f over container followed by merge results
-lbind(f, arg) -> Callable                    # f(arg, x) - left partial application
-rbind(f, arg) -> Callable                    # f(x, arg) - right partial application
-identity(x) -> Any                           # returns x unchanged
-matcher(f, container) -> Callable            # find element in container where f matches
-extract(container, f) -> Any                 # first element satisfying predicate f
+compose(outer, inner) -> Callable                    # outer(inner(x))
+chain(h, g, f) -> Callable                           # h(g(f(x)))
+combine_two_function_results(outer, f1, f2) -> Callable  # outer(f1(x), f2(x))
+transform(f, container) -> Container                 # map
+transform_and_flatten(f, container) -> FrozenSet     # map + flatten
+transform_both(f, a, b) -> Tuple                     # pairwise map over tuples
+transform_both_and_flatten(f, a, b) -> Tuple         # pairwise map + flatten
+apply_each_function(funcs, value) -> Container       # apply each function to the same value
+apply_function_on_cartesian_product(f, a, b) -> FrozenSet
+fix_first_argument(f, arg) -> Callable                # left partial
+fix_last_argument(f, arg) -> Callable                 # right partial
+equals(f, target) -> Callable                         # x -> f(x) == target
+extract_first_matching(container, pred) -> Any        # first element satisfying pred
+power(f, n) -> Callable                               # f applied n times
+identity(x) -> Any                                    # returns x unchanged
 ```
 
 **Grid Transforms:**
 ```python
-hmirror(grid) -> Grid/Patch                  # flip left-right
-vmirror(grid) -> Grid/Patch                  # flip up-down
-dmirror(grid) -> Grid/Patch                  # diagonal \\ mirror
-cmirror(grid) -> Grid/Patch                  # diagonal / mirror
-rot90(grid) -> Grid                          # rotate 90° clockwise
-rot180(grid) -> Grid                         # rotate 180°
-rot270(grid) -> Grid                         # rotate 270° clockwise
-vconcat(a, b) -> Grid                        # stack vertically [a; b]
-hconcat(a, b) -> Grid                        # stack horizontally [a, b]
-crop(grid, (i,j), (h,w)) -> Grid             # extract subgrid starting at (i,j) with dimensions (h,w)
-upscale(grid, n) -> Grid/Object              # enlarge by factor n
-downscale(grid, n) -> Grid                   # shrink by factor n
-hsplit(grid, n) -> Tuple                     # split horizontally into n parts
-vsplit(grid, n) -> Tuple                     # split vertically into n parts
-tophalf/bottomhalf -> Grid                   # get top/bottom half
-lefthalf/righthalf -> Grid                   # get left/right half
-trim(grid) -> Grid                           # remove border
+horizontal_mirror(grid) -> Grid/Patch                # flip up-down
+vertical_mirror(grid) -> Grid/Patch                  # flip left-right
+diagonal_mirror(grid) -> Grid/Patch                  # diagonal \ mirror
+counterdiagonal_mirror(grid) -> Grid/Patch           # diagonal / mirror
+rot90(grid) -> Grid                                  # rotate 90° clockwise
+rot180(grid) -> Grid                                 # rotate 180°
+rot270(grid) -> Grid                                 # rotate 270° clockwise
+vertical_concat(a, b) -> Grid                        # stack vertically [a; b]
+horizontal_concat(a, b) -> Grid                      # stack horizontally [a, b]
+crop(grid, (i,j), (h,w)) -> Grid                     # extract subgrid
+upscale(element, n) -> Grid/Object                   # enlarge by factor n
+downscale(grid, n) -> Grid                           # shrink by factor n
+horizontal_upscale(grid, n) -> Grid                  # widen by n
+vertical_upscale(grid, n) -> Grid                    # height by n
+horizontal_split(grid, n) -> Tuple                   # split into n vertical slabs
+vertical_split(grid, n) -> Tuple                     # split into n horizontal slabs
+top_half/bottom_half/left_half/right_half -> Grid    # halves
+trim_border(grid) -> Grid                            # remove 1-cell border
+smallest_subgrid_containing(patch, grid) -> Grid     # tight crop around patch
 ```
 
-**Objects:**
+**Objects & Indices:**
 ```python
-objects(grid, univalued, diagonal, without_bg) -> FrozenSet[Object]
-# Find connected components (separate shapes/regions)
-# univalued: T = single-color objects, F = multicolor allowed
-# diagonal: T = diagonal connects (8-connected), F = only orthogonal (4-connected)
-# without_bg: T = ignore background (most common color)
-# Returns: frozenset of objects
+as_objects(grid, each_object_single_color, include_diagonal_neighbors, discard_background) -> FrozenSet[Object]
+partition(grid) -> Objects                           # objects by color
+partition_only_foreground(grid) -> Objects           # objects by color w/o background
 
-colorfilter(objects, color) -> FrozenSet[Object]  # Keep only objects of specified color
-sizefilter(objects, n) -> FrozenSet               # Keep only objects with exactly n cells
-ofcolor(grid, color) -> Indices                   # get all indices of specified color
-toobject(patch, grid) -> Object                   # convert patch to object with colors
-normalize(obj) -> Patch                           # move object to origin (0,0)
-toindices(obj) -> Indices                         # extract just the (i,j) positions
-asindices(grid) -> Indices                        # all non-background cell positions
-```
-
-**Modifications:**
-```python
-fill(grid, color, patch) -> Grid                  # color cells in patch/indices
-paint(grid, obj) -> Grid                          # draw object onto grid
-replace(grid, old, new) -> Grid                   # swap all instances of old color with new
-switch(grid, a, b) -> Grid                        # swap two colors
-move(grid, obj, offset) -> Grid                   # move object by offset
-shift(patch, (di, dj)) -> Patch                   # translate patch by offset
-cover(grid, patch) -> Grid                        # remove object (fill with background)
+color_filter(objects, color) -> Objects              # filter by color
+size_filter(objects, n) -> FrozenSet                 # keep of size n
+of_color(grid, color) -> Indices                     # indices of a color
+to_object(patch, grid) -> Object                     # patch -> colored object
+shift_to_origin(obj) -> Patch                        # move object to (0,0)
+to_indices(patch_or_obj) -> Indices                  # indices only
+as_indices(grid) -> Indices                          # all grid indices
+as_object(grid) -> Object                            # grid -> object
+recolor(color, patch) -> Object                      # recolor patch
+shift_by_vector(patch, (di, dj)) -> Patch            # translate
+paint_onto_grid(grid, obj) -> Grid                   # draw object
+paint_onto_grid_background(grid, obj) -> Grid        # draw only onto background
+fill(grid, color, patch) -> Grid                     # color cells in indices/patch
+erase_patch(grid, patch) -> Grid                     # fill patch with background
+move_object(grid, obj, offset) -> Grid               # move obj by offset
 ```
 
 **Spatial Queries:**
 ```python
-ulcorner(obj) -> IntegerTuple                     # upper-left corner
-urcorner(obj) -> IntegerTuple                     # upper-right corner
-llcorner(obj) -> IntegerTuple                     # lower-left corner
-lrcorner(obj) -> IntegerTuple                     # lower-right corner
-center(patch) -> IntegerTuple                     # center point of patch
-corners(patch) -> Indices                         # all 4 corner positions
-position(a, b) -> IntegerTuple                    # relative position between patches
-box(patch) -> Indices                             # outline of bounding box
-inbox(patch) -> Indices                           # interior outline of box
-outbox(patch) -> Indices                          # exterior outline of box
-backdrop(patch) -> Indices                        # all indices in bounding box
-delta(patch) -> Indices                           # bounding box minus the patch
-vfrontier(loc) -> Indices                         # vertical line through location
-hfrontier(loc) -> Indices                         # horizontal line through location
-shoot(start, direction) -> Indices                # ray from point in direction
-connect(a, b) -> Indices                          # line between two points
+upper_left_corner/upper_right_corner/lower_left_corner/lower_right_corner(obj) -> IntegerTuple
+center(patch) -> IntegerTuple
+corner_indices(patch) -> Indices
+position(a, b) -> IntegerTuple                       # relative (-1/0/1, -1/0/1)
+box(patch) -> Indices                                # bounding-box outline
+inbox(patch) -> Indices                              # outline 1 inside
+outbox(patch) -> Indices                             # outline 1 outside
+bounding_box_indices(patch) -> Indices               # all indices in box
+bounding_box_delta(patch) -> Indices                 # box minus patch
+vertical_line(loc) -> Indices                        # vertical line through loc
+horizontal_line(loc) -> Indices                      # horizontal line through loc
+shoot(start, direction) -> Indices                   # ray from point in direction
+line_between(a, b) -> Indices                        # line between two points
+adjacent(a, b) -> Boolean                            # patches touch
+horizontal_matching(a, b) -> Boolean                 # share a row
+vertical_matching(a, b) -> Boolean                   # share a column
+manhattan_distance(a, b) -> Integer                  # min Manhattan distance
+move_until_touching(src, dst) -> IntegerTuple        # offset to touch
+```
+
+**Shape/Geometry Predicates:**
+```python
+is_portrait(piece) -> Boolean
+is_square(piece) -> Boolean
+is_vertical_line(patch) -> Boolean
+is_horizontal_line(patch) -> Boolean
 ```
 
 **Properties:**
 ```python
-height(grid) -> Integer                           # number of rows
-width(grid) -> Integer                            # number of columns
-shape(grid/obj) -> IntegerTuple                   # (height, width) tuple
-size(container) -> Integer                        # number of elements
-palette(grid) -> FrozenSet[Integer]               # set of colors used
-mostcolor(grid) -> Integer                        # most frequent color (background)
-leastcolor(grid) -> Integer                       # least frequent color
-color(obj) -> Integer                             # color of single-color object
-index(grid, (i, j)) -> Integer/None               # value at location
-occurrences(grid, obj) -> Indices                 # locations where obj appears
-compress(grid) -> Grid                            # remove uniform rows/columns
-frontiers(grid) -> FrozenSet[Object]              # get uniform rows/columns
-hperiod(obj) -> Integer                           # horizontal period
-vperiod(obj) -> Integer                           # vertical period
-gravitate(src, dst) -> IntegerTuple               # offset to move src next to dst
+get_height(grid_or_patch) -> Integer
+get_width(grid_or_patch) -> Integer
+get_shape(grid_or_patch) -> IntegerTuple
+size(container) -> Integer
+palette(element) -> FrozenSet[int]
+count_colors(element) -> Integer
+most_common_color(element) -> Integer
+least_common_color(element) -> Integer
+get_color(obj) -> Integer
+color_at_location(grid, (i,j)) -> Integer/None
+occurrences(grid, obj) -> Indices
+cellwise(a, b, fallback) -> Grid
+horizontal_periodicity(obj) -> Integer
+vertical_periodicity(obj) -> Integer
+solid_color_strips_in_grid(grid) -> Objects          # formerly frontiers
+remove_solid_color_strips_from_grid(grid) -> Grid    # formerly compress
 ```
 
 **Set Operations:**
 ```python
-combine(a, b) -> Container                        # union of containers
-intersection(a, b) -> FrozenSet                   # intersection of sets
-difference(a, b) -> FrozenSet                     # a - b (set difference)
-merge(containers) -> Container                    # flatten container of containers
-dedupe(tuple) -> Tuple                            # remove duplicates
-sfilter(container, f) -> Container                # filter by predicate
-mfilter(container, f) -> FrozenSet                # filter and merge
-contained(val, set) -> Boolean                    # membership test (val in set)
-initset(value) -> FrozenSet                       # create singleton frozenset
+union(a, b) -> Container                             # concatenate/union
+intersection(a, b) -> FrozenSet
+difference(a, b) -> FrozenSet
+flatten(containers) -> Container                     # flatten nested
+remove_duplicates(t) -> Tuple
+keep_if_condition(container, pred) -> Container
+keep_if_condition_and_flatten(container, pred) -> FrozenSet
+contains(value, container) -> Boolean
+initset(value) -> FrozenSet
+insert(value, frozenset) -> FrozenSet
+remove(value, container) -> Container
+to_tuple(frozenset) -> Tuple
+cartesian_product(a, b) -> FrozenSet
+pairwise(a, b) -> TupleTuple
+as_tuple(a, b) -> IntegerTuple
+as_generic_tuple(a, b) -> Tuple
+make_cell(color, (i,j)) -> Tuple                     # (color, (i,j))
+interval(start, stop, step) -> Tuple
 ```
 
 **Aggregation:**
 ```python
-argmax(container, f) -> Any                       # item with maximum f(item)
-argmin(container, f) -> Any                       # item with minimum f(item)
-valmax(container, f) -> Integer                   # maximum value of f over container
-valmin(container, f) -> Integer                   # minimum value of f over container
-maximum(container) -> Integer                     # max element
-minimum(container) -> Integer                     # min element
-mostcommon(container) -> Any                      # most frequent element
-leastcommon(container) -> Any                     # least frequent element
-order(container, key) -> Tuple                    # sort by key function
+argmax(container, f) -> Any
+argmin(container, f) -> Any
+valmax(container, f) -> Integer
+valmin(container, f) -> Integer
+maximum(container) -> Integer
+minimum(container) -> Integer
+most_common(container) -> Any
+least_common(container) -> Any
+sort(container, key_fn) -> Tuple
 ```
 
-**Arithmetic:**
+**Arithmetic & Vectors:**
 ```python
-add(a, b) -> Numerical                            # addition (works on ints and tuples)
-subtract(a, b) -> Numerical                       # subtraction
-multiply(a, b) -> Numerical                       # multiplication
-divide(a, b) -> Numerical                         # floor division
-invert(n) -> Numerical                            # negation
-double(n) -> Numerical                            # multiply by 2
-halve(n) -> Numerical                             # divide by 2
-increment(x) -> Numerical                         # add 1
-decrement(x) -> Numerical                         # subtract 1
-sign(x) -> Numerical                              # -1, 0, or 1 based on sign
-toivec(i) -> IntegerTuple                         # (i, 0) - vertical vector
-tojvec(j) -> IntegerTuple                         # (0, j) - horizontal vector
-```
-
-**Constructors:**
-```python
-canvas(color, (height, width)) -> Grid            # Create blank grid
-astuple(a, b, ...) -> IntegerTuple                # create tuple from elements
-repeat(item, n) -> Tuple                          # tuple with item repeated n times
+add(a, b) -> Numerical
+subtract(a, b) -> Numerical
+multiply(a, b) -> Numerical
+divide(a, b) -> Numerical
+negate(n) -> Numerical
+double(n) -> Numerical
+halve(n) -> Numerical
+increment(x) -> Numerical
+decrement(x) -> Numerical
+sign(x) -> Numerical or IntegerTuple
+to_vertical_vec(i) -> IntegerTuple
+to_horizontal_vec(j) -> IntegerTuple
 ```
 
 **Boolean:**
 ```python
-equality(a, b) -> Boolean                         # a == b
-both(a, b) -> Boolean                             # a and b
-either(a, b) -> Boolean                           # a or b
-flip(b) -> Boolean                                # not b
-contained(val, set) -> Boolean                    # val in set
-positive(n) -> Boolean                            # n > 0
-even(n) -> Boolean                                # n % 2 == 0
-greater(a, b) -> Boolean                          # a > b
-```
-
-**Advanced:**
-```python
-cellwise(a, b, fallback) -> Grid                  # compare grids cell-by-cell
+is_equal(a, b) -> Boolean
+logical_and(a, b) -> Boolean
+logical_or(a, b) -> Boolean
+logical_not(b) -> Boolean
+contains(value, container) -> Boolean
+is_positive(n) -> Boolean
+is_even(n) -> Boolean
+greater_than(a, b) -> Boolean
 ```
 
 **Constants:**
@@ -566,7 +620,7 @@ cellwise(a, b, fallback) -> Grid                  # compare grids cell-by-cell
 # Colors: ZERO=0, ONE=1, TWO=2, THREE=3, FOUR=4, FIVE=5, SIX=6, SEVEN=7, EIGHT=8, NINE=9
 # Directions: UP=(-1,0), DOWN=(1,0), LEFT=(0,-1), RIGHT=(0,1)
 # Diagonals: UNITY=(1,1), NEG_UNITY=(-1,-1), UP_RIGHT=(-1,1), DOWN_LEFT=(1,-1)
-# Special: ORIGIN=(0,0), T=True, F=False
+# Special: ORIGIN=(0,0), True=True, False=False
 ```
 
 ## Control Flow Allowed
@@ -578,22 +632,23 @@ cellwise(a, b, fallback) -> Grid                  # compare grids cell-by-cell
 - Function signature: `def solve(I):`
 - Input `I` is tuple of tuples of ints (Grid)
 - Return same format
-- Use ONLY DSL primitives listed above
+- Use ONLY the DSL primitives listed above (arc-dsl-llm names)
 - Add brief comments for clarity
-- Use functional programming patterns when appropriate (compose, chain, fork, lbind/rbind, mapply)
+- Prefer functional patterns (compose, chain, combine_two_function_results, fix_first_argument/fix_last_argument, transform, transform_and_flatten)
 - You can adapt patterns from similar programs but adjust them to match the pattern description
 
 ## Output Format
 ```python
 def solve(I):
     # [comment explaining step]
-    x1 = dsl_function(I)
-    
+    x1 = some_dsl_function(I)
+
     # [comment]
     x2 = another_function(x1, args)
-    
+
     # [final step]
-    return O # O is the output grid
+    return O  # O is the output grid
 ```
 
-Generate the solve function now:"""
+Generate the solve function now:
+"""

@@ -1,7 +1,9 @@
 """
 Main pipeline for ARC task solving using execution-based similarity.
 
-Pipeline: Program Similarity → Pattern Discovery → Code Generation
+Pipeline: Sequential phases per task, parallelized across tasks
+- Each task: Phase 1 (find_similar) → Phase 2 (generate solution) sequentially
+- Multiple tasks run in parallel
 """
 
 import re
@@ -11,9 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-print("Script starting...", flush=True)
-sys.stdout.flush()
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from vlm_prompter import VLMPrompter
@@ -22,8 +24,18 @@ from utils.library import ProgramLibrary, calculate_grid_similarity
 from utils.dsl import *
 from utils.constants import *
 
-print("Imports done...", flush=True)
-sys.stdout.flush()
+
+class ThreadSafeVLMClient:
+    """VLM client wrapper for parallel API calls"""
+    def __init__(self, client):
+        self.client = client
+    
+    def query(self, prompt, system_prompt=None):
+        return self.client.query(prompt, system_prompt)
+    
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
 
 @dataclass
 class TaskResult:
@@ -32,7 +44,20 @@ class TaskResult:
     success: bool
     score: float
     program: Optional[str] = None
-    phase1_output: Optional[str] = None
+    phase2a_output: Optional[str] = None  # Hypothesis formation
+    phase2b_output: Optional[str] = None  # Hypothesis validation
+    error: Optional[str] = None
+
+
+@dataclass
+class Phase1Result:
+    """Result from Phase 1: finding similar programs"""
+    task_id: str
+    task: Dict
+    similar_programs: Optional[List[Dict]]
+    best_library_score: float
+    best_library_program: Optional[str]
+    perfect_match_found: bool
     error: Optional[str] = None
 
 
@@ -56,7 +81,7 @@ def test_program(program_code: str, task: Dict) -> Tuple[float, List[Tuple[Any, 
         scores = []
         results = []
         
-        for example in task['train']:
+        for example in task['test']:
             inp = example['input']
             expected = example['output']
             if isinstance(inp, list):
@@ -94,211 +119,193 @@ def extract_code_from_response(response: str) -> Optional[str]:
     return None
 
 
-def solve_task(
+def phase1_find_similar(
     task: Dict,
     task_id: str,
-    vlm_client_phase1: BaseVLMClient,
-    vlm_client_phase2: BaseVLMClient,
-    prompter: VLMPrompter,
     library: ProgramLibrary,
-    verbose: bool = True,
-    n_workers: int = None,
-    timeout: int = 2,
-    log_dir: str = "logs"
-) -> TaskResult:
+    timeout: int = 2
+) -> Phase1Result:
     """
-    Solve a single ARC task using execution-based pipeline.
-    
-    Pipeline:
-    1. Find similar programs by execution (parallelized)
-    2. Phase 1: Pattern discovery (natural language) with similar programs
-    3. Phase 2: Code generation with pattern + similar programs
+    Phase 1: Find similar programs by execution.
     
     Args:
         task: Task dictionary with 'train' examples
         task_id: Unique task identifier
-        vlm_client: VLM client for queries
-        prompter: Prompt builder
         library: Program library
-        verbose: Print progress
-        n_workers: Number of parallel workers (None = auto)
-        timeout: Timeout per program execution in seconds
-        log_dir: Directory to save logs (default: "logs")
-    """
-    # Create log directory if it doesn't exist
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
-    
-    if verbose:
-        print(f"\n{'='*80}", flush=True)
-        print(f"Solving Task: {task_id}", flush=True)
-        print(f"{'='*80}", flush=True)
-    
-    try:
-        # ====================================================================
-        # STEP 1: Find Similar Programs by Execution (PARALLELIZED)
-        # ====================================================================
-        if verbose:
-            print("\n🔍 Finding similar programs by execution...", flush=True)
+        timeout: Timeout per program execution
         
+    Returns:
+        Phase1Result with similar programs and library matches
+    """
+    try:
+        # Find similar programs by execution (now sequential)
         similar_programs = library.find_similar(
             train_examples=task['train'],
-            top_k=40,
-            min_similarity=0.0,
-            n_workers=n_workers,
+            top_k=5,
+            min_similarity=0.1,
             timeout=timeout
         )
         
-        if verbose:
-            if similar_programs:
-                print(f"   Found {len(similar_programs)} similar programs:", flush=True)
-                for i, prog in enumerate(similar_programs[:3], 1):
-                    print(f"   {i}. Task {prog['task_id']}: {prog['similarity']:.2f}", flush=True)
-            else:
-                print("   No similar programs found", flush=True)
-        
-        # ====================================================================
-        # TEST LIBRARY PROGRAMS: Try existing solutions first
-        # ====================================================================
+        # Test library programs for perfect match
         best_library_score = 0.0
         best_library_program = None
+        perfect_match = False
         
         if similar_programs:
             best_match = similar_programs[0]
             best_library_score = best_match['similarity']
             best_library_program = best_match['program']
-            if verbose:
-                print(f"\n✓ Best library match: Task {best_match['task_id']} ({best_library_score:.2f})", flush=True)
             
             if best_library_score == 1.0:
-                if verbose:
-                    print(f"   → Perfect match found! Using library solution.", flush=True)
-                return TaskResult(
-                    task_id=task_id,
-                    success=True,
-                    score=1.0,
-                    program=best_library_program
-                )
-                
-        # ====================================================================
-        # PHASE 1: Pattern Discovery (Natural Language)
-        # ====================================================================
-        if verbose:
-            print("\n📝 Phase 1: Pattern Discovery...", flush=True)
+                perfect_match = True
         
-        # Pass the raw similar_programs list - prompter will format it
-        phase1_prompt = prompter.build_phase1_prompt(task, similar_programs)
-        
-        phase1_output = vlm_client_phase1.query(
-            phase1_prompt,
-            system_prompt=""""You are an expert at solving ARC puzzles by thinking like a human playing a visual puzzle game.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-CRITICAL COGNITIVE FRAME:
-
-These puzzles exist in an OBJECT/ACTION space, not a pixel coordinate space.
-Think compositionally like playing Pacman, Sokoban, or Tetris:
-
-✓ GOOD: "Extract the largest red object, rotate it 90°, align with top border"
-✓ GOOD: "Red pixels shoot downward in free vertical lanes until hitting a wall"
-✓ GOOD: "Fill each enclosed region with the color of its boundary"
-
-✗ BAD: "Pixels at positions where value > 0 and row == col become value 7"
-✗ BAD: "Apply transformation matrix to coordinates meeting condition X"
-
-Objects: Connected components, shapes, borders, regions, bounding boxes
-Actions: Extract, rotate, shoot, bounce, fill, merge, filter, align, crop
-
-Think as sequences: "First find X, then do Y to it, then place result at Z"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-KNOWN FAILURE MODES:
-
-1. Premature narrowing: You lock onto your first hypothesis from Example 1 
-   and force-fit it to other examples, rationalizing discrepancies.
-
-2. Imagined verification: You believe you've checked all examples thoroughly 
-   when you've only done surface-level pattern matching on Example 1.
-
-3. Pixel-space thinking: You fall back on coordinate transforms and 
-   pixel-by-pixel operations instead of object-level reasoning.
-
-4. Over-complexity: You create convoluted multi-case rules when a simpler 
-   compositional sequence would work better.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-CORE INSTRUCTIONS:
-
-- Observe pixels, but REASON about objects and actions
-- Generate multiple diverse hypotheses before committing (not just variations of the same idea)
-- State explicit disproof criteria: "This hypothesis dies if Example 2 shows X"
-- Before finalizing, actively ask: "Did I narrow prematurely? What else could explain these patterns?"
-- Simpler is usually correct: if you can't explain it to a 10-year-old, revisit your logic
-- The transformation should make intuitive visual sense, like a game mechanic
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Remember: Your first hypothesis is sticky and excessively convincing to you.
-Combat this by generating alternatives and actively seeking evidence against your initial guess.
-"""
+        return Phase1Result(
+            task_id=task_id,
+            task=task,
+            similar_programs=similar_programs,
+            best_library_score=best_library_score,
+            best_library_program=best_library_program,
+            perfect_match_found=perfect_match
         )
         
-        # LOG PHASE 1 OUTPUT
-        phase1_log_path = os.path.join(log_dir, f"{task_id}_phase1_output.txt")
-        with open(phase1_log_path, 'w', encoding='utf-8') as f:
+    except Exception as e:
+        return Phase1Result(
+            task_id=task_id,
+            task=task,
+            similar_programs=None,
+            best_library_score=0.0,
+            best_library_program=None,
+            perfect_match_found=False,
+            error=str(e)
+        )
+
+
+def phase2_generate_solution(
+    phase1_result: Phase1Result,
+    vlm_client_phase1: BaseVLMClient,
+    vlm_client_phase2: BaseVLMClient,
+    prompter: VLMPrompter,
+    library: ProgramLibrary,
+    log_dir: str = "logs"
+) -> TaskResult:
+    """
+    Phase 2: Generate solution using two-stage pattern discovery and code generation.
+    """
+    task_id = phase1_result.task_id
+    task = phase1_result.task
+    
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Handle Phase 1 perfect match or errors
+        if phase1_result.perfect_match_found:
+            return TaskResult(
+                task_id=task_id,
+                success=True,
+                score=1.0,
+                program=phase1_result.best_library_program
+            )
+        
+        if phase1_result.error:
+            return TaskResult(
+                task_id=task_id,
+                success=False,
+                score=0.0,
+                error=f"Phase 1 failed: {phase1_result.error}"
+            )
+        
+        # ====================================================================
+        # PHASE 2A: Initial Hypothesis Formation (Training Only)
+        # ====================================================================
+        phase2a_prompt = prompter.build_phase2a_prompt(
+            task, 
+            phase1_result.similar_programs
+        )
+        
+        phase2a_output = vlm_client_phase1.query(
+            phase2a_prompt,
+            system_prompt="""You are an expert at analyzing ARC puzzles and discovering transformation patterns.
+            
+Remember: Your first hypothesis is sticky and excessively convincing to you.
+Combat this by evolving your hypothesis as you see each training example."""
+        )
+        
+        # Log Phase 2A output
+        phase2a_log_path = os.path.join(log_dir, f"{task_id}_phase2a_hypothesis.txt")
+        with open(phase2a_log_path, 'w', encoding='utf-8') as f:
             f.write(f"Task ID: {task_id}\n")
             f.write("="*80 + "\n")
-            f.write("PHASE 1: PATTERN DISCOVERY OUTPUT\n")
+            f.write("PHASE 2A: HYPOTHESIS FORMATION (TRAINING ONLY)\n")
             f.write("="*80 + "\n\n")
-            f.write(phase1_output)
+            f.write(phase2a_output)
         
-        if verbose:
-            print(f"   ✓ Phase 1 complete ({len(phase1_output)} chars)", flush=True)
-            print(f"   📄 Logged to: {phase1_log_path}", flush=True)
+        # Extract hypothesis from phase2a_output
+        hypothesis = extract_hypothesis_from_response(phase2a_output)
         
         # ====================================================================
-        # PHASE 2: Code Generation
+        # PHASE 2B: Hypothesis Validation (Training + Test)
         # ====================================================================
-        if verbose:
-            print("\n⚙️  Phase 2: Code Generation...", flush=True)
-        
-        # Pass the raw similar_programs list - prompter will format it
-        phase2_prompt = prompter.build_phase2_prompt(task, 
-            phase1_output,
-            similar_programs
+        phase2b_prompt = prompter.build_phase2b_prompt(
+            task,
+            hypothesis,
+            phase1_result.similar_programs
         )
         
-        phase2_output = vlm_client_phase2.query(
-            phase2_prompt,
-            system_prompt="You are an expert at generating Python code using the given DSL primitives to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training examples. Generate a Python function `def solve(I):` that implements the described transformation using ONLY the provided DSL primitives. Ensure your code is syntactically correct and follows best practices."
+        phase2b_output = vlm_client_phase1.query(
+            phase2b_prompt,
+            system_prompt="""You are an expert at analyzing ARC puzzles and discovering transformation patterns.
+
+You are given an initial hypothesis about the puzzle. If the hypothesis doesn't extend to the test input while explaining the training examples, refine it to create a more accurate pattern description.
+Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple transformation that applies to all samples, both training and test.
+Combat this by evolving your hypothesis"""
         )
         
-        if verbose:
-            print(f"   ✓ Phase 2 complete ({len(phase2_output)} chars)", flush=True)
+        # Log Phase 2B output
+        phase2b_log_path = os.path.join(log_dir, f"{task_id}_phase2b_validation.txt")
+        with open(phase2b_log_path, 'w', encoding='utf-8') as f:
+            f.write(f"Task ID: {task_id}\n")
+            f.write("="*80 + "\n")
+            f.write("PHASE 2B: HYPOTHESIS VALIDATION (TRAINING + TEST)\n")
+            f.write("="*80 + "\n\n")
+            f.write("INITIAL HYPOTHESIS:\n")
+            f.write("-"*80 + "\n")
+            f.write(hypothesis + "\n")
+            f.write("-"*80 + "\n\n")
+            f.write("VALIDATION OUTPUT:\n")
+            f.write("-"*80 + "\n")
+            f.write(phase2b_output)
+        
+        # Extract validated pattern from phase2b_output
+        validated_pattern = extract_validated_pattern_from_response(phase2b_output)
+        
+        # ====================================================================
+        # PHASE 2C: Code Generation
+        # ====================================================================
+        phase2c_prompt = prompter.build_phase2c_prompt(
+            task, 
+            validated_pattern,  # Use validated pattern
+            phase1_result.similar_programs
+        )
+        
+        phase2c_output = vlm_client_phase2.query(
+            phase2c_prompt,
+            system_prompt="You are an expert at generating code using the given DSL primitives to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training and test examples and some similar programs you might find useful as reference. Generate a Python function `def solve(I):` that implements the described transformation using ONLY the provided DSL primitives. Ensure your code is syntactically correct and follows best practices"
+        )
         
         # ====================================================================
         # EXTRACT AND TEST GENERATED CODE
         # ====================================================================
-        if verbose:
-            print("\n🧪 Testing generated program...", flush=True)
-        
-        generated_code = extract_code_from_response(phase2_output)
+        generated_code = extract_code_from_response(phase2c_output)
         
         if not generated_code:
-            if verbose:
-                print("   ✗ Failed to extract code", flush=True)
-            
-            if best_library_program and best_library_score > 0.5:
-                if verbose:
-                    print(f"   → Falling back to library (score: {best_library_score:.2f})", flush=True)
+            if phase1_result.best_library_program and phase1_result.best_library_score > 0.5:
                 return TaskResult(
                     task_id=task_id,
                     success=False,
-                    score=best_library_score,
-                    program=best_library_program,
-                    phase1_output=phase1_output,
+                    score=phase1_result.best_library_score,
+                    program=phase1_result.best_library_program,
+                    phase2a_output=phase2a_output,
+                    phase2b_output=phase2b_output,
                     error="Code extraction failed, using library fallback"
                 )
             
@@ -306,21 +313,19 @@ Combat this by generating alternatives and actively seeking evidence against you
                 task_id=task_id,
                 success=False,
                 score=0.0,
-                phase1_output=phase1_output,
+                phase2a_output=phase2a_output,
+                phase2b_output=phase2b_output,
                 error="Failed to extract code from response"
             )
         
         score, results = test_program(generated_code, task)
         
-        if verbose:
-            print(f"   Generated score: {score:.2f}", flush=True)
-        
-        # LOG PHASE 2 OUTPUT WITH TEST RESULTS
-        phase2_log_path = os.path.join(log_dir, f"{task_id}_phase2_results.txt")
-        with open(phase2_log_path, 'w', encoding='utf-8') as f:
+        # Log Phase 2C output with test results
+        phase2c_log_path = os.path.join(log_dir, f"{task_id}_phase2c_results.txt")
+        with open(phase2c_log_path, 'w', encoding='utf-8') as f:
             f.write(f"Task ID: {task_id}\n")
             f.write("="*80 + "\n")
-            f.write("PHASE 2: CODE GENERATION & TEST RESULTS\n")
+            f.write("PHASE 2C: CODE GENERATION & TEST RESULTS\n")
             f.write("="*80 + "\n\n")
             
             f.write("GENERATED CODE:\n")
@@ -346,9 +351,6 @@ Combat this by generating alternatives and actively seeking evidence against you
                     f.write("None (execution failed)\n")
                 f.write("-"*40 + "\n")
         
-        if verbose:
-            print(f"   📄 Logged to: {phase2_log_path}", flush=True)
-        
         # ====================================================================
         # DECIDE FINAL PROGRAM
         # ====================================================================
@@ -356,11 +358,9 @@ Combat this by generating alternatives and actively seeking evidence against you
         final_program = generated_code
         final_score = score
         
-        if not success and best_library_score > score:
-            if verbose:
-                print(f"   → Library program better ({best_library_score:.2f} > {score:.2f})", flush=True)
-            final_program = best_library_program
-            final_score = best_library_score
+        if not success and phase1_result.best_library_score > score:
+            final_program = phase1_result.best_library_program
+            final_score = phase1_result.best_library_score
         
         # ====================================================================
         # SAVE TO LIBRARY IF SUCCESSFUL
@@ -370,21 +370,17 @@ Combat this by generating alternatives and actively seeking evidence against you
             exec(final_program, namespace)
             if 'solve' in namespace:
                 library.add(task_id, final_program)
-                if verbose:
-                    print(f"   ✓ Added to library", flush=True)
         
         return TaskResult(
             task_id=task_id,
             success=success,
             score=final_score,
             program=final_program,
-            phase1_output=phase1_output
+            phase2a_output=phase2a_output,
+            phase2b_output=phase2b_output
         )
         
     except Exception as e:
-        if verbose:
-            print(f"   ✗ Error: {e}", flush=True)
-        
         return TaskResult(
             task_id=task_id,
             success=False,
@@ -393,27 +389,113 @@ Combat this by generating alternatives and actively seeking evidence against you
         )
 
 
+def extract_hypothesis_from_response(response: str) -> str:
+    """Extract the final hypothesis from phase 2a response."""
+    import re
+    
+    # Try to find pattern_summary first
+    pattern_match = re.search(r'<pattern_summary>(.*?)</pattern_summary>', 
+                             response, re.DOTALL)
+    if pattern_match:
+        return pattern_match.group(1).strip()
+    
+    # Fall back to last hypothesis tag
+    hypothesis_matches = re.findall(r'<hypothesis_\d+>(.*?)</hypothesis_\d+>', 
+                                   response, re.DOTALL)
+    if hypothesis_matches:
+        return hypothesis_matches[-1].strip()
+    
+    # If no tags found, return last substantial paragraph
+    paragraphs = [p.strip() for p in response.split('\n\n') if len(p.strip()) > 50]
+    return paragraphs[-1] if paragraphs else response[-500:]
+
+
+def extract_validated_pattern_from_response(response: str) -> str:
+    """Extract the validated pattern from phase 2b response."""
+    import re
+    
+    # Try to find validated_pattern first
+    pattern_match = re.search(r'<validated_pattern>(.*?)</validated_pattern>', 
+                             response, re.DOTALL)
+    if pattern_match:
+        return pattern_match.group(1).strip()
+    
+    # If no tag found, return entire response (it's all the validated pattern)
+    return response.strip()
+
+
+def process_single_task(
+    task_id: str,
+    task: Dict,
+    vlm_client_phase1: BaseVLMClient,
+    vlm_client_phase2: BaseVLMClient,
+    prompter: VLMPrompter,
+    library: ProgramLibrary,
+    timeout: int = 2,
+    log_dir: str = "logs"
+) -> TaskResult:
+    """
+    Process a single task through all phases sequentially.
+    
+    Args:
+        task_id: Task identifier
+        task: Task data
+        vlm_client_phase1: VLM client for pattern discovery
+        vlm_client_phase2: VLM client for code generation
+        prompter: Prompt builder
+        library: Program library
+        timeout: Timeout per program execution
+        log_dir: Directory for logs
+    
+    Returns:
+        TaskResult
+    """
+    # Phase 1: Find similar programs
+    phase1_result = phase1_find_similar(
+        task=task,
+        task_id=task_id,
+        library=library,
+        timeout=timeout
+    )
+    
+    # Phase 2: Generate solution
+    phase2_result = phase2_generate_solution(
+        phase1_result=phase1_result,
+        vlm_client_phase1=vlm_client_phase1,
+        vlm_client_phase2=vlm_client_phase2,
+        prompter=prompter,
+        library=library,
+        log_dir=log_dir
+    )
+    
+    return phase2_result
+
+
 def process_directory(
     data_dir: str,
     vlm_client_phase1: BaseVLMClient,
     vlm_client_phase2: BaseVLMClient,
     prompter: VLMPrompter,
     library: ProgramLibrary,
-    verbose: bool = True,
-    n_workers: int = None,
-    timeout: int = 2
+    timeout: int = 2,
+    max_concurrent_tasks: int = 10,
+    log_dir: str = "logs"
 ) -> List[TaskResult]:
     """
-    Process all task files in a directory.
+    Process all task files with sequential phases per task, parallelized across tasks.
     
     Args:
         data_dir: Directory containing task JSON files
-        vlm_client: VLM client for queries
+        vlm_client_phase1: VLM client for pattern discovery
+        vlm_client_phase2: VLM client for code generation
         prompter: Prompt builder
         library: Program library
-        verbose: Print progress
-        n_workers: Number of parallel workers for library search (None = auto)
-        timeout: Timeout per program execution in seconds
+        timeout: Timeout per program execution
+        max_concurrent_tasks: Maximum number of tasks to process in parallel
+        log_dir: Directory for logs
+    
+    Returns:
+        List of TaskResult objects
     """
     data_path = Path(data_dir)
     
@@ -427,53 +509,99 @@ def process_directory(
         print(f"No JSON files found in {data_dir}", flush=True)
         return []
     
-    print(f"\nFound {len(json_files)} tasks in {data_dir}\n", flush=True)
+    print(f"\n{'='*80}", flush=True)
+    print(f"SEQUENTIAL PIPELINE (PARALLELIZED ACROSS TASKS)", flush=True)
+    print(f"{'='*80}", flush=True)
+    print(f"Total tasks: {len(json_files)}", flush=True)
+    print(f"Max concurrent tasks: {max_concurrent_tasks}", flush=True)
+    print(f"Timeout per program: {timeout}s", flush=True)
+    print(f"{'='*80}\n", flush=True)
     
-    results = []
-    successful = 0
-    total_score = 0.0
+    # Load all tasks
+    print(f"Loading {len(json_files)} tasks...", flush=True)
+    tasks_data = []
     
-    for i, task_file in enumerate(json_files, 1):
+    for task_file in json_files:
         task_id = task_file.stem
-        
         try:
             with open(task_file, 'r') as f:
                 task = json.load(f)
-            
-            result = solve_task(
-                task=task,
+            tasks_data.append((task_id, task))
+        except Exception as e:
+            print(f"✗ {task_id}: {e}", flush=True)
+    
+    print(f"Loaded {len(tasks_data)} valid tasks\n", flush=True)
+    
+    # Statistics tracking
+    results = []
+    results_lock = threading.Lock()
+    stats = {
+        'completed': 0,
+        'successful': 0,
+        'total_score': 0.0
+    }
+    stats_lock = threading.Lock()
+    
+    def worker(task_id, task):
+        """Worker function to process a single task"""
+        try:
+            result = process_single_task(
                 task_id=task_id,
+                task=task,
                 vlm_client_phase1=vlm_client_phase1,
                 vlm_client_phase2=vlm_client_phase2,
                 prompter=prompter,
                 library=library,
-                verbose=verbose,
-                n_workers=n_workers,
-                timeout=timeout
+                timeout=timeout,
+                log_dir=log_dir
             )
             
-            results.append(result)
+            with stats_lock:
+                stats['completed'] += 1
+                if result.success:
+                    stats['successful'] += 1
+                stats['total_score'] += result.score
+                
+                status = "✓" if result.success else "✗"
+                print(f"{status} [{stats['completed']}/{len(tasks_data)}] {result.task_id}: {result.score:.2f}", flush=True)
             
-            if result.success:
-                successful += 1
+            with results_lock:
+                results.append(result)
             
-            total_score += result.score
+            return result
             
-            status = "✓" if result.success else "✗"
-            print(f"{status} [{i}/{len(json_files)}] {task_id}: {result.score:.2f}", flush=True)
-            
-        except json.JSONDecodeError as e:
-            print(f"✗ [{i}/{len(json_files)}] {task_id}: Invalid JSON - {e}", flush=True)
         except Exception as e:
-            print(f"✗ [{i}/{len(json_files)}] {task_id}: {e}", flush=True)
+            print(f"✗ Error processing {task_id}: {e}", flush=True)
+            return TaskResult(
+                task_id=task_id,
+                success=False,
+                score=0.0,
+                error=str(e)
+            )
+    
+    # Process tasks in parallel
+    print(f"Starting task processing...\n", flush=True)
+    
+    with ThreadPoolExecutor(max_workers=max_concurrent_tasks) as executor:
+        futures = [
+            executor.submit(worker, task_id, task)
+            for task_id, task in tasks_data
+        ]
+        
+        # Wait for all tasks to complete
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"Task failed with exception: {e}", flush=True)
     
     # Summary
     print(f"\n{'='*80}", flush=True)
     print(f"SUMMARY", flush=True)
     print(f"{'='*80}", flush=True)
-    print(f"Total tasks: {len(json_files)}", flush=True)
-    print(f"Successful: {successful}/{len(json_files)} ({100*successful/len(json_files):.1f}%)", flush=True)
-    print(f"Average score: {total_score/len(json_files):.2f}", flush=True)
+    print(f"Total tasks: {len(tasks_data)}", flush=True)
+    print(f"Successful: {stats['successful']}/{len(tasks_data)} ({100*stats['successful']/len(tasks_data):.1f}%)", flush=True)
+    print(f"Average score: {stats['total_score']/len(tasks_data):.2f}", flush=True)
     print(f"{'='*80}\n", flush=True)
     
     return results
@@ -515,9 +643,9 @@ def save_results(results: List[TaskResult], output_dir: str = 'results') -> None
 def main():
     from dotenv import load_dotenv
     """Main entry point"""
-    # print("Initializing components...", flush=True)
     load_dotenv()
-    PROVIDER = "openai"
+    PROVIDER = "grok"
+    
     if PROVIDER == "grok":
         api_key = os.getenv('GROK_API_KEY')
         api_base = "https://api.x.ai/v1"
@@ -528,7 +656,7 @@ def main():
         model = "Qwen/Qwen2.5-7B-Instruct"
     elif PROVIDER == "gemini":
         api_key = os.getenv('GEMINI_API_KEY')
-        api_base = "https://generativelanguage.googleapis.com/v1beta"
+        api_base = "https://generativelanguage.googleapis.com/v1beta/models/"
         model = "gemini-2.5-pro"
     elif PROVIDER == "openai":
         api_key = os.getenv('OPENAI_API_KEY')
@@ -539,45 +667,41 @@ def main():
         api_key=api_key,
         model=model,
         api_base=api_base,
-        max_tokens=16384  # Longer for analysis
+        max_tokens=16384,
+        max_retries=3,
+        save_prompts=False,
+        prompt_log_dir="prompts_test_1"#TODO change dir if needed
     )
     vlm_config_phase2 = VLMConfig(
         api_key=api_key,
         model=model,
+        max_retries=3,
         api_base=api_base,
-        max_tokens=8192   # Shorter for code gen
+        max_tokens=8192
     )
     
-    vlm_client_phase1 = create_client(PROVIDER, config=vlm_config_phase1)
-    # print("VLM client created", flush=True)
-    
-    vlm_client_phase2 = create_client(PROVIDER, config=vlm_config_phase2)
+    base_client_phase1 = create_client(PROVIDER, config=vlm_config_phase1)
+    base_client_phase2 = create_client(PROVIDER, config=vlm_config_phase2)
+    vlm_client_phase1 = ThreadSafeVLMClient(base_client_phase1)
+    vlm_client_phase2 = ThreadSafeVLMClient(base_client_phase2)
     prompter = VLMPrompter()
-    # print("Prompter created", flush=True)
+    library = ProgramLibrary()
     
-    library = ProgramLibrary()  # Auto-loads from solvers.py
-    # print("Loaded library...", flush=True)
-    #sanity check
-    print(f"Loaded {len(library)} programs from library", flush=True)
-    if len(library) > 0:
-        print(f"First program: {library.programs[0]['task_id']}", flush=True)
-    
-    # Configure parallelization
+    # Run simplified pipeline
     results = process_directory(
-        data_dir='data_v1/eval_size_10',
+        data_dir='data_v1/eval_size_10',#TODO change dir if needed
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,
         library=library,
-        verbose=True,
-        n_workers=None,  # Auto-detect CPUs (recommended)
-        timeout=2        # 2 second timeout per program
+        timeout=2,
+        max_concurrent_tasks=10,  # Process 10 tasks in parallel
+        log_dir="logs_test_1"#TODO change dir if needed
     )
     
-    save_results(results, output_dir='results/eval_new')
+    save_results(results, output_dir='results/test_1')#TODO change dir if needed
 
 
 if __name__ == "__main__":
-    # print("Starting main...", flush=True)
     sys.stdout.flush()
     main()

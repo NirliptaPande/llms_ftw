@@ -6,16 +6,22 @@ from typing import (
     Container,
     Callable,
     FrozenSet,
-    Iterable
+    Iterable,
+    NewType,
+    overload,
 )
 
 Boolean = bool
 Integer = int
+IntegerSet = FrozenSet[Integer]
 IntegerTuple = Tuple[Integer, Integer]
 Numerical = Union[Integer, IntegerTuple]
-IntegerSet = FrozenSet[Integer]
-Grid = Tuple[Tuple[Integer]]
-Cell = Tuple[Integer, IntegerTuple]
+Color = NewType('Color', int)
+ColorSet = FrozenSet[Color]
+#Grid = Tuple[Tuple[Integer]]
+#Cell = Tuple[Integer, IntegerTuple]
+Grid = Tuple[Tuple[Color]]
+Cell = Tuple[Color, IntegerTuple]
 Object = FrozenSet[Cell]
 Objects = FrozenSet[Object]
 Indices = FrozenSet[IntegerTuple]

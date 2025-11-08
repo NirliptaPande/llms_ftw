@@ -5,7 +5,8 @@ Multi-Provider VLM Client for Grok, Qwen (vLLM), and Gemini APIs
 import os
 import time
 import requests
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union, List, Dict, Any
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from abc import ABC, abstractmethod
@@ -21,6 +22,8 @@ class VLMConfig:
     timeout: int = 240
     max_retries: int = 1
     retry_delay: float = 1.0
+    save_prompts: bool = False
+    prompt_log_dir: str = "prompts"
 
 class BaseVLMClient(ABC):
     """Base class for VLM clients"""
@@ -29,6 +32,7 @@ class BaseVLMClient(ABC):
         self.config = config
         self.session = requests.Session()
         self._setup_session()
+        self.prompt_counter = 0
     
     @abstractmethod
     def _setup_session(self):
@@ -36,7 +40,7 @@ class BaseVLMClient(ABC):
         pass
     
     @abstractmethod
-    def _build_payload(self, prompt: str, system_prompt: Optional[str]) -> dict:
+    def _build_payload(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str]) -> dict:#TODO: Change system prompt to union of str and content blocks
         """Build API request payload"""
         pass
     
@@ -45,7 +49,60 @@ class BaseVLMClient(ABC):
         """Extract text from API response"""
         pass
     
-    def query(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+    def _save_prompt_html(self, payload: dict, prompt_type: str = "query"):
+        """Save prompt as HTML file with images rendered inline"""
+        if not self.config.save_prompts:
+            return
+        
+        # Create log directory
+        log_dir = Path(self.config.prompt_log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.prompt_counter += 1
+        filename = f"{prompt_type}_{self.prompt_counter:03d}.html"
+        filepath = log_dir / filename
+        
+        # Build HTML
+        html_parts = ['<!DOCTYPE html><html><head><meta charset="utf-8">']
+        html_parts.append('<style>body{font-family:monospace;margin:20px;} ')
+        html_parts.append('.message{border:1px solid #ccc;margin:10px 0;padding:10px;} ')
+        html_parts.append('.role{font-weight:bold;color:#0066cc;} ')
+        html_parts.append('img{max-width:600px;margin:10px 0;border:1px solid #eee;}</style></head><body>')
+        html_parts.append(f'<h2>Prompt Log #{self.prompt_counter}</h2>')
+        
+        # Extract messages from payload
+        messages = payload.get('messages', [])
+        
+        for msg in messages:
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')
+            
+            html_parts.append(f'<div class="message"><div class="role">{role.upper()}:</div>')
+            
+            # Handle string content
+            if isinstance(content, str):
+                html_parts.append(f'<pre>{content}</pre>')
+            
+            # Handle content blocks (list)
+            elif isinstance(content, list):
+                for block in content:
+                    if block.get('type') == 'text':
+                        html_parts.append(f'<pre>{block["text"]}</pre>')
+                    elif block.get('type') == 'image_url':
+                        url = block['image_url']['url']
+                        html_parts.append(f'<img src="{url}" />')
+            
+            html_parts.append('</div>')
+        
+        html_parts.append('</body></html>')
+        
+        # Write file
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(html_parts))
+        
+        print(f"📝 Saved prompt to: {filepath}")
+        
+    def query(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str] = None) -> str:#TODO: Change system prompt to union of str and content blocks
         """
         Query the VLM API with a prompt
         
@@ -57,6 +114,7 @@ class BaseVLMClient(ABC):
             Response text from the model
         """
         payload = self._build_payload(prompt, system_prompt)
+        # self._save_prompt_html(payload, prompt_type=f"{self.config.model}")
         
         for attempt in range(self.config.max_retries):
             try:
@@ -108,7 +166,7 @@ class GrokClient(BaseVLMClient):
             'Content-Type': 'application/json'
         })
     
-    def _build_payload(self, prompt: str, system_prompt: Optional[str]) -> dict:
+    def _build_payload(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str]) -> dict:#TODO: Change system prompt to union of str and content blocks
         messages = []
         if system_prompt:
             messages.append({'role': 'system', 'content': system_prompt})
@@ -135,7 +193,7 @@ class QwenClient(BaseVLMClient):
             'Content-Type': 'application/json'
         })
     
-    def _build_payload(self, prompt: str, system_prompt: Optional[str]) -> dict:
+    def _build_payload(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str]) -> dict:#TODO: Change system prompt to union of str and content blocks
         messages = []
         if system_prompt:
             messages.append({'role': 'system', 'content': system_prompt})
@@ -162,18 +220,36 @@ class GeminiClient(BaseVLMClient):
             'Content-Type': 'application/json'
         })
     
-    def _build_payload(self, prompt: str, system_prompt: Optional[str]) -> dict:
-        # Gemini uses different format
+    def _build_payload(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str]) -> dict:
         contents = []
         
-        # Combine system prompt with user prompt for Gemini
-        full_prompt = prompt
-        if system_prompt:
-            full_prompt = f"{system_prompt}\n\n{prompt}"
-        
-        contents.append({
-            'parts': [{'text': full_prompt}]
-        })
+        # Combine system prompt with user prompt
+        if isinstance(prompt, str):
+            full_prompt = prompt
+            if system_prompt:
+                full_prompt = f"{system_prompt}\n\n{prompt}"
+            contents.append({'parts': [{'text': full_prompt}]})
+        else:  # List of content blocks
+            parts = []
+            if system_prompt:
+                parts.append({'text': system_prompt})
+            
+            # Convert content blocks to Gemini format
+            for block in prompt:
+                if block.get('type') == 'text':
+                    parts.append({'text': block['text']})
+                elif block.get('type') == 'image_url':
+                    # Extract base64 data
+                    url = block['image_url']['url']
+                    if url.startswith('data:image/png;base64,'):
+                        base64_data = url.split(',', 1)[1]
+                        parts.append({
+                            'inline_data': {
+                                'mime_type': 'image/png',
+                                'data': base64_data
+                            }
+                        })
+            contents.append({'parts': parts})
         
         return {
             'contents': contents,
@@ -182,7 +258,7 @@ class GeminiClient(BaseVLMClient):
                 'maxOutputTokens': self.config.max_tokens,
             }
         }
-    
+        
     def _extract_response(self, data: dict) -> str:
         if 'candidates' in data and len(data['candidates']) > 0:
             parts = data['candidates'][0]['content']['parts']
@@ -260,7 +336,7 @@ def create_client(provider: str = "grok", config: Optional[VLMConfig] = None) ->
                 raise ValueError("GEMINI_API_KEY not set")
             config = VLMConfig(
                 api_key=api_key,
-                model="gemini-1.5-flash",
+                model="gemini-2.5-pro",
                 api_base="https://generativelanguage.googleapis.com/v1beta"
             )
         return GeminiClient(config)

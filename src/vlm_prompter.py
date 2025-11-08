@@ -439,180 +439,171 @@ Callable: Function type
 
 **Functional Programming:**
 ```python
-compose(outer, inner) -> Callable                    # outer(inner(x))
-chain(h, g, f) -> Callable                           # h(g(f(x)))
-combine_two_function_results(outer, f1, f2) -> Callable  # outer(f1(x), f2(x))
-transform(f, container) -> Container                 # map
-transform_and_flatten(f, container) -> FrozenSet     # map + flatten
-transform_both(f, a, b) -> Tuple                     # pairwise map over tuples
-transform_both_and_flatten(f, a, b) -> Tuple         # pairwise map + flatten
-apply_each_function(funcs, value) -> Container       # apply each function to the same value
-apply_function_on_cartesian_product(f, a, b) -> FrozenSet
-fix_first_argument(f, arg) -> Callable                # left partial
-fix_last_argument(f, arg) -> Callable                 # right partial
-equals(f, target) -> Callable                         # x -> f(x) == target
-extract_first_matching(container, pred) -> Any        # first element satisfying pred
-power(f, n) -> Callable                               # f applied n times
-identity(x) -> Any                                    # returns x unchanged
+compose(f, g) -> Callable                    # f(g(x)) - function composition
+chain(f, g, h, ...) -> Callable              # f(g(h(...(x)))) - chain multiple functions
+fork(combiner, f, g) -> Callable             # combiner(f(x), g(x)) - apply two functions and combine
+apply(f, container) -> Container             # apply f to each element
+mapply(f, container) -> FrozenSet            # apply f over container followed by merge results
+lbind(f, arg) -> Callable                    # f(arg, x) - left partial application
+rbind(f, arg) -> Callable                    # f(x, arg) - right partial application
+identity(x) -> Any                           # returns x unchanged
+matcher(f, container) -> Callable            # find element in container where f matches
+extract(container, f) -> Any                 # first element satisfying predicate f
 ```
 
 **Grid Transforms:**
 ```python
-horizontal_mirror(grid) -> Grid/Patch                # flip up-down
-vertical_mirror(grid) -> Grid/Patch                  # flip left-right
-diagonal_mirror(grid) -> Grid/Patch                  # diagonal \ mirror
-counterdiagonal_mirror(grid) -> Grid/Patch           # diagonal / mirror
-rot90(grid) -> Grid                                  # rotate 90° clockwise
-rot180(grid) -> Grid                                 # rotate 180°
-rot270(grid) -> Grid                                 # rotate 270° clockwise
-vertical_concat(a, b) -> Grid                        # stack vertically [a; b]
-horizontal_concat(a, b) -> Grid                      # stack horizontally [a, b]
-crop(grid, (i,j), (h,w)) -> Grid                     # extract subgrid
-upscale(element, n) -> Grid/Object                   # enlarge by factor n
-downscale(grid, n) -> Grid                           # shrink by factor n
-horizontal_upscale(grid, n) -> Grid                  # widen by n
-vertical_upscale(grid, n) -> Grid                    # height by n
-horizontal_split(grid, n) -> Tuple                   # split into n vertical slabs
-vertical_split(grid, n) -> Tuple                     # split into n horizontal slabs
-top_half/bottom_half/left_half/right_half -> Grid    # halves
-trim_border(grid) -> Grid                            # remove 1-cell border
-smallest_subgrid_containing(patch, grid) -> Grid     # tight crop around patch
+hmirror(grid) -> Grid/Patch                  # flip left-right
+vmirror(grid) -> Grid/Patch                  # flip up-down
+dmirror(grid) -> Grid/Patch                  # diagonal \\ mirror
+cmirror(grid) -> Grid/Patch                  # diagonal / mirror
+rot90(grid) -> Grid                          # rotate 90° clockwise
+rot180(grid) -> Grid                         # rotate 180°
+rot270(grid) -> Grid                         # rotate 270° clockwise
+vconcat(a, b) -> Grid                        # stack vertically [a; b]
+hconcat(a, b) -> Grid                        # stack horizontally [a, b]
+crop(grid, (i,j), (h,w)) -> Grid             # extract subgrid starting at (i,j) with dimensions (h,w)
+upscale(grid, n) -> Grid/Object              # enlarge by factor n
+downscale(grid, n) -> Grid                   # shrink by factor n
+hsplit(grid, n) -> Tuple                     # split horizontally into n parts
+vsplit(grid, n) -> Tuple                     # split vertically into n parts
+tophalf/bottomhalf -> Grid                   # get top/bottom half
+lefthalf/righthalf -> Grid                   # get left/right half
+trim(grid) -> Grid                           # remove border
 ```
 
-**Objects & Indices:**
+**Objects:**
 ```python
-as_objects(grid, each_object_single_color, include_diagonal_neighbors, discard_background) -> FrozenSet[Object]
-partition(grid) -> Objects                           # objects by color
-partition_only_foreground(grid) -> Objects           # objects by color w/o background
+objects(grid, univalued, diagonal, without_bg) -> FrozenSet[Object]
+# Find connected components (separate shapes/regions)
+# univalued: T = single-color objects, F = multicolor allowed
+# diagonal: T = diagonal connects (8-connected), F = only orthogonal (4-connected)
+# without_bg: T = ignore background (most common color)
+# Returns: frozenset of objects
 
-color_filter(objects, color) -> Objects              # filter by color
-size_filter(objects, n) -> FrozenSet                 # keep of size n
-of_color(grid, color) -> Indices                     # indices of a color
-to_object(patch, grid) -> Object                     # patch -> colored object
-shift_to_origin(obj) -> Patch                        # move object to (0,0)
-to_indices(patch_or_obj) -> Indices                  # indices only
-as_indices(grid) -> Indices                          # all grid indices
-as_object(grid) -> Object                            # grid -> object
-recolor(color, patch) -> Object                      # recolor patch
-shift_by_vector(patch, (di, dj)) -> Patch            # translate
-paint_onto_grid(grid, obj) -> Grid                   # draw object
-paint_onto_grid_background(grid, obj) -> Grid        # draw only onto background
-fill(grid, color, patch) -> Grid                     # color cells in indices/patch
-erase_patch(grid, patch) -> Grid                     # fill patch with background
-move_object(grid, obj, offset) -> Grid               # move obj by offset
+colorfilter(objects, color) -> FrozenSet[Object]  # Keep only objects of specified color
+sizefilter(objects, n) -> FrozenSet               # Keep only objects with exactly n cells
+ofcolor(grid, color) -> Indices                   # get all indices of specified color
+toobject(patch, grid) -> Object                   # convert patch to object with colors
+normalize(obj) -> Patch                           # move object to origin (0,0)
+toindices(obj) -> Indices                         # extract just the (i,j) positions
+asindices(grid) -> Indices                        # all non-background cell positions
+```
+
+**Modifications:**
+```python
+fill(grid, color, patch) -> Grid                  # color cells in patch/indices
+paint(grid, obj) -> Grid                          # draw object onto grid
+replace(grid, old, new) -> Grid                   # swap all instances of old color with new
+switch(grid, a, b) -> Grid                        # swap two colors
+move(grid, obj, offset) -> Grid                   # move object by offset
+shift(patch, (di, dj)) -> Patch                   # translate patch by offset
+cover(grid, patch) -> Grid                        # remove object (fill with background)
 ```
 
 **Spatial Queries:**
 ```python
-upper_left_corner/upper_right_corner/lower_left_corner/lower_right_corner(obj) -> IntegerTuple
-center(patch) -> IntegerTuple
-corner_indices(patch) -> Indices
-position(a, b) -> IntegerTuple                       # relative (-1/0/1, -1/0/1)
-box(patch) -> Indices                                # bounding-box outline
-inbox(patch) -> Indices                              # outline 1 inside
-outbox(patch) -> Indices                             # outline 1 outside
-bounding_box_indices(patch) -> Indices               # all indices in box
-bounding_box_delta(patch) -> Indices                 # box minus patch
-vertical_line(loc) -> Indices                        # vertical line through loc
-horizontal_line(loc) -> Indices                      # horizontal line through loc
-shoot(start, direction) -> Indices                   # ray from point in direction
-line_between(a, b) -> Indices                        # line between two points
-adjacent(a, b) -> Boolean                            # patches touch
-horizontal_matching(a, b) -> Boolean                 # share a row
-vertical_matching(a, b) -> Boolean                   # share a column
-manhattan_distance(a, b) -> Integer                  # min Manhattan distance
-move_until_touching(src, dst) -> IntegerTuple        # offset to touch
-```
-
-**Shape/Geometry Predicates:**
-```python
-is_portrait(piece) -> Boolean
-is_square(piece) -> Boolean
-is_vertical_line(patch) -> Boolean
-is_horizontal_line(patch) -> Boolean
+ulcorner(obj) -> IntegerTuple                     # upper-left corner
+urcorner(obj) -> IntegerTuple                     # upper-right corner
+llcorner(obj) -> IntegerTuple                     # lower-left corner
+lrcorner(obj) -> IntegerTuple                     # lower-right corner
+center(patch) -> IntegerTuple                     # center point of patch
+corners(patch) -> Indices                         # all 4 corner positions
+position(a, b) -> IntegerTuple                    # relative position between patches
+box(patch) -> Indices                             # outline of bounding box
+inbox(patch) -> Indices                           # interior outline of box
+outbox(patch) -> Indices                          # exterior outline of box
+backdrop(patch) -> Indices                        # all indices in bounding box
+delta(patch) -> Indices                           # bounding box minus the patch
+vfrontier(loc) -> Indices                         # vertical line through location
+hfrontier(loc) -> Indices                         # horizontal line through location
+shoot(start, direction) -> Indices                # ray from point in direction
+connect(a, b) -> Indices                          # line between two points
 ```
 
 **Properties:**
 ```python
-get_height(grid_or_patch) -> Integer
-get_width(grid_or_patch) -> Integer
-get_shape(grid_or_patch) -> IntegerTuple
-size(container) -> Integer
-palette(element) -> FrozenSet[int]
-count_colors(element) -> Integer
-most_common_color(element) -> Integer
-least_common_color(element) -> Integer
-get_color(obj) -> Integer
-color_at_location(grid, (i,j)) -> Integer/None
-occurrences(grid, obj) -> Indices
-cellwise(a, b, fallback) -> Grid
-horizontal_periodicity(obj) -> Integer
-vertical_periodicity(obj) -> Integer
-solid_color_strips_in_grid(grid) -> Objects          # formerly frontiers
-remove_solid_color_strips_from_grid(grid) -> Grid    # formerly compress
+height(grid) -> Integer                           # number of rows
+width(grid) -> Integer                            # number of columns
+shape(grid/obj) -> IntegerTuple                   # (height, width) tuple
+size(container) -> Integer                        # number of elements
+palette(grid) -> FrozenSet[Integer]               # set of colors used
+mostcolor(grid) -> Integer                        # most frequent color (background)
+leastcolor(grid) -> Integer                       # least frequent color
+color(obj) -> Integer                             # color of single-color object
+index(grid, (i, j)) -> Integer/None               # value at location
+occurrences(grid, obj) -> Indices                 # locations where obj appears
+compress(grid) -> Grid                            # remove uniform rows/columns
+frontiers(grid) -> FrozenSet[Object]              # get uniform rows/columns
+hperiod(obj) -> Integer                           # horizontal period
+vperiod(obj) -> Integer                           # vertical period
+gravitate(src, dst) -> IntegerTuple               # offset to move src next to dst
 ```
 
 **Set Operations:**
 ```python
-union(a, b) -> Container                             # concatenate/union
-intersection(a, b) -> FrozenSet
-difference(a, b) -> FrozenSet
-flatten(containers) -> Container                     # flatten nested
-remove_duplicates(t) -> Tuple
-keep_if_condition(container, pred) -> Container
-keep_if_condition_and_flatten(container, pred) -> FrozenSet
-contains(value, container) -> Boolean
-initset(value) -> FrozenSet
-insert(value, frozenset) -> FrozenSet
-remove(value, container) -> Container
-to_tuple(frozenset) -> Tuple
-cartesian_product(a, b) -> FrozenSet
-pairwise(a, b) -> TupleTuple
-as_tuple(a, b) -> IntegerTuple
-as_generic_tuple(a, b) -> Tuple
-make_cell(color, (i,j)) -> Tuple                     # (color, (i,j))
-interval(start, stop, step) -> Tuple
+combine(a, b) -> Container                        # union of containers
+intersection(a, b) -> FrozenSet                   # intersection of sets
+difference(a, b) -> FrozenSet                     # a - b (set difference)
+merge(containers) -> Container                    # flatten container of containers
+dedupe(tuple) -> Tuple                            # remove duplicates
+sfilter(container, f) -> Container                # filter by predicate
+mfilter(container, f) -> FrozenSet                # filter and merge
+contained(val, set) -> Boolean                    # membership test (val in set)
+initset(value) -> FrozenSet                       # create singleton frozenset
 ```
 
 **Aggregation:**
 ```python
-argmax(container, f) -> Any
-argmin(container, f) -> Any
-valmax(container, f) -> Integer
-valmin(container, f) -> Integer
-maximum(container) -> Integer
-minimum(container) -> Integer
-most_common(container) -> Any
-least_common(container) -> Any
-sort(container, key_fn) -> Tuple
+argmax(container, f) -> Any                       # item with maximum f(item)
+argmin(container, f) -> Any                       # item with minimum f(item)
+valmax(container, f) -> Integer                   # maximum value of f over container
+valmin(container, f) -> Integer                   # minimum value of f over container
+maximum(container) -> Integer                     # max element
+minimum(container) -> Integer                     # min element
+mostcommon(container) -> Any                      # most frequent element
+leastcommon(container) -> Any                     # least frequent element
+order(container, key) -> Tuple                    # sort by key function
 ```
 
-**Arithmetic & Vectors:**
+**Arithmetic:**
 ```python
-add(a, b) -> Numerical
-subtract(a, b) -> Numerical
-multiply(a, b) -> Numerical
-divide(a, b) -> Numerical
-negate(n) -> Numerical
-double(n) -> Numerical
-halve(n) -> Numerical
-increment(x) -> Numerical
-decrement(x) -> Numerical
-sign(x) -> Numerical or IntegerTuple
-to_vertical_vec(i) -> IntegerTuple
-to_horizontal_vec(j) -> IntegerTuple
+add(a, b) -> Numerical                            # addition (works on ints and tuples)
+subtract(a, b) -> Numerical                       # subtraction
+multiply(a, b) -> Numerical                       # multiplication
+divide(a, b) -> Numerical                         # floor division
+invert(n) -> Numerical                            # negation
+double(n) -> Numerical                            # multiply by 2
+halve(n) -> Numerical                             # divide by 2
+increment(x) -> Numerical                         # add 1
+decrement(x) -> Numerical                         # subtract 1
+sign(x) -> Numerical                              # -1, 0, or 1 based on sign
+toivec(i) -> IntegerTuple                         # (i, 0) - vertical vector
+tojvec(j) -> IntegerTuple                         # (0, j) - horizontal vector
+```
+
+**Constructors:**
+```python
+canvas(color, (height, width)) -> Grid            # Create blank grid
+astuple(a, b, ...) -> IntegerTuple                # create tuple from elements
+repeat(item, n) -> Tuple                          # tuple with item repeated n times
 ```
 
 **Boolean:**
 ```python
-is_equal(a, b) -> Boolean
-logical_and(a, b) -> Boolean
-logical_or(a, b) -> Boolean
-logical_not(b) -> Boolean
-contains(value, container) -> Boolean
-is_positive(n) -> Boolean
-is_even(n) -> Boolean
-greater_than(a, b) -> Boolean
+equality(a, b) -> Boolean                         # a == b
+both(a, b) -> Boolean                             # a and b
+either(a, b) -> Boolean                           # a or b
+flip(b) -> Boolean                                # not b
+contained(val, set) -> Boolean                    # val in set
+positive(n) -> Boolean                            # n > 0
+even(n) -> Boolean                                # n % 2 == 0
+greater(a, b) -> Boolean                          # a > b
+```
+
+**Advanced:**
+```python
+cellwise(a, b, fallback) -> Grid                  # compare grids cell-by-cell
 ```
 
 **Constants:**
@@ -620,7 +611,7 @@ greater_than(a, b) -> Boolean
 # Colors: ZERO=0, ONE=1, TWO=2, THREE=3, FOUR=4, FIVE=5, SIX=6, SEVEN=7, EIGHT=8, NINE=9
 # Directions: UP=(-1,0), DOWN=(1,0), LEFT=(0,-1), RIGHT=(0,1)
 # Diagonals: UNITY=(1,1), NEG_UNITY=(-1,-1), UP_RIGHT=(-1,1), DOWN_LEFT=(1,-1)
-# Special: ORIGIN=(0,0), True=True, False=False
+# Special: ORIGIN=(0,0), T=True, F=False
 ```
 
 ## Control Flow Allowed
@@ -632,22 +623,22 @@ greater_than(a, b) -> Boolean
 - Function signature: `def solve(I):`
 - Input `I` is tuple of tuples of ints (Grid)
 - Return same format
-- Use ONLY the DSL primitives listed above (arc-dsl-llm names)
+- Use ONLY DSL primitives listed above
 - Add brief comments for clarity
-- Prefer functional patterns (compose, chain, combine_two_function_results, fix_first_argument/fix_last_argument, transform, transform_and_flatten)
+- Use functional programming patterns when appropriate (compose, chain, fork, lbind/rbind, mapply)
 - You can adapt patterns from similar programs but adjust them to match the pattern description
 
 ## Output Format
 ```python
 def solve(I):
     # [comment explaining step]
-    x1 = some_dsl_function(I)
-
+    x1 = dsl_function(I)
+    
     # [comment]
     x2 = another_function(x1, args)
-
+    
     # [final step]
-    return O  # O is the output grid
+    return O # O is the output grid
 ```
 
 Generate the solve function now:

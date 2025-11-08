@@ -311,16 +311,14 @@ class ProgramLibrary:
                     train_examples: List[Dict[str, Any]], 
                     top_k: int = 3,
                     min_similarity: float = 0.0,
-                    n_workers: int = None,
                     timeout: int = 2) -> List[Dict]:
         """
-        Find programs based on execution similarity (parallelized).
+        Find programs based on execution similarity.
         
         Args:
             train_examples: Training examples to test against
             top_k: Number of top programs to return
             min_similarity: Minimum similarity threshold
-            n_workers: Number of parallel workers (default: CPU count - 4)
             timeout: Timeout per program execution in seconds
         
         Returns:
@@ -336,14 +334,9 @@ class ProgramLibrary:
             print("WARNING: No train examples provided!", flush=True)
             return []
         
-        # Determine number of workers
-        if n_workers is None:
-            cpu_count = mp.cpu_count()
-            n_workers = max(1, cpu_count - 4)  # Leave some CPUs free
+        print(f"Running sequential evaluation (timeout: {timeout}s per program)", flush=True)
         
-        print(f"Using {n_workers} parallel workers (timeout: {timeout}s per program)", flush=True)
-        
-        # Prepare program data for parallel processing
+        # Prepare program data for processing
         prog_data_list = [
             (prog['task_id'], prog['solve_func'], prog['functions'])
             for prog in self.programs
@@ -354,57 +347,40 @@ class ProgramLibrary:
         all_results = []  # Track all results for debugging
         
         start_time = time.time()
+        completed = 0
+        failed = 0
         
-        # Use ProcessPoolExecutor for true parallelism
-        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
-            # Create partial function with fixed arguments
-            eval_func = partial(
-                evaluate_single_program,
-                train_examples=train_examples,
-                min_similarity=min_similarity,
-                timeout=timeout
-            )
+        # Process programs sequentially
+        for idx, prog_data in enumerate(prog_data_list):
+            completed += 1
             
-            # Submit all tasks
-            future_to_idx = {
-                executor.submit(eval_func, prog_data): idx 
-                for idx, prog_data in enumerate(prog_data_list)
-            }
+            # Progress update every 50 programs
+            if completed % 50 == 0 or completed == len(self.programs):
+                elapsed = time.time() - start_time
+                rate = completed / elapsed if elapsed > 0 else 0
+                print(f"Progress: {completed}/{len(self.programs)} programs ({rate:.1f}/s, {elapsed:.1f}s elapsed)", flush=True)
             
-            # Process results as they complete
-            completed = 0
-            failed = 0
-            
-            for future in concurrent.futures.as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                completed += 1
+            try:
+                result = evaluate_single_program(
+                    prog_data,
+                    train_examples=train_examples,
+                    min_similarity=min_similarity,
+                    timeout=timeout
+                )
                 
-                # Progress update every 50 programs
-                if completed % 50 == 0 or completed == len(self.programs):
-                    elapsed = time.time() - start_time
-                    rate = completed / elapsed if elapsed > 0 else 0
-                    print(f"Progress: {completed}/{len(self.programs)} programs ({rate:.1f}/s, {elapsed:.1f}s elapsed)", flush=True)
-                
-                try:
-                    result = future.result(timeout=timeout + 1)  # Slightly longer than execution timeout
+                if result is not None:
+                    all_results.append(result)
                     
-                    if result is not None:
-                        all_results.append(result)
-                        
-                        if result['above_threshold']:
-                            if result['has_perfect_example']:
-                                perfect_programs.append(result)
-                            else:
-                                other_programs.append(result)
+                    if result['above_threshold']:
+                        if result['has_perfect_example']:
+                            perfect_programs.append(result)
+                        else:
+                            other_programs.append(result)
                             
-                except concurrent.futures.TimeoutError:
-                    failed += 1
-                    if failed <= 5:  # Only log first few
-                        print(f"WARNING: Program {idx} ({prog_data_list[idx][0]}) timed out", flush=True)
-                except Exception as e:
-                    failed += 1
-                    if failed <= 5:  # Only log first few errors
-                        print(f"WARNING: Program {idx} ({prog_data_list[idx][0]}) failed: {e}", flush=True)
+            except Exception as e:
+                failed += 1
+                if failed <= 5:  # Only log first few errors
+                    print(f"WARNING: Program {idx} ({prog_data[0]}) failed: {e}", flush=True)
         
         total_time = time.time() - start_time
         print(f"\nEvaluation complete: {completed}/{len(self.programs)} programs in {total_time:.1f}s", flush=True)
@@ -456,63 +432,62 @@ class ProgramLibrary:
                 print(f"Second program: {result[1]['task_id']} (sim: {result[1]['similarity']:.3f})", flush=True)
         
         return result
-    
-    def test_program(self, 
-                    solve_func, 
-                    train_examples: List[Dict[str, Any]],
-                    timeout: int = 2) -> Dict:
-        """
-        Test a single program on training examples.
-        
-        Args:
-            solve_func: Function to test
-            train_examples: List of {'input': grid, 'output': grid}
-            timeout: Timeout per execution in seconds
-        
-        Returns:
-            Dict with keys: avg_similarity, example_results
-        """
-        results = []
-        
-        for i, example in enumerate(train_examples):
-            input_grid = example['input']
-            expected_output = example['output']
+        def test_program(self, 
+                        solve_func, 
+                        train_examples: List[Dict[str, Any]],
+                        timeout: int = 2) -> Dict:
+            """
+            Test a single program on training examples.
             
-            output, error = execute_program_safely(solve_func, input_grid, timeout_seconds=timeout)
+            Args:
+                solve_func: Function to test
+                train_examples: List of {'input': grid, 'output': grid}
+                timeout: Timeout per execution in seconds
             
-            if error is not None:
-                results.append({
-                    'example_idx': i,
-                    'success': False,
-                    'error': error,
-                    'similarity': 0.0
-                })
-            else:
-                sim = calculate_grid_similarity(output, expected_output)
-                results.append({
-                    'example_idx': i,
-                    'success': True,
-                    'similarity': sim,
-                    'output': output
-                })
+            Returns:
+                Dict with keys: avg_similarity, example_results
+            """
+            results = []
+            
+            for i, example in enumerate(train_examples):
+                input_grid = example['input']
+                expected_output = example['output']
+                
+                output, error = execute_program_safely(solve_func, input_grid, timeout_seconds=timeout)
+                
+                if error is not None:
+                    results.append({
+                        'example_idx': i,
+                        'success': False,
+                        'error': error,
+                        'similarity': 0.0
+                    })
+                else:
+                    sim = calculate_grid_similarity(output, expected_output)
+                    results.append({
+                        'example_idx': i,
+                        'success': True,
+                        'similarity': sim,
+                        'output': output
+                    })
+            
+            avg_sim = sum(r['similarity'] for r in results) / len(results) if results else 0.0
+            
+            return {
+                'avg_similarity': avg_sim,
+                'example_results': results
+            }
         
-        avg_sim = sum(r['similarity'] for r in results) / len(results) if results else 0.0
+        def get(self, task_id: str) -> Dict:
+            """Get program by task ID"""
+            for prog in self.programs:
+                if prog['task_id'] == task_id:
+                    return prog
+            return None
         
-        return {
-            'avg_similarity': avg_sim,
-            'example_results': results
-        }
-    
-    def get(self, task_id: str) -> Dict:
-        """Get program by task ID"""
-        for prog in self.programs:
-            if prog['task_id'] == task_id:
-                return prog
-        return None
-    
-    def __len__(self):
-        """Number of programs in library"""
-        return len(self.programs)
+        def __len__(self):
+            """Number of programs in library"""
+            return len(self.programs)
 
 
 def format_similar_programs_for_prompt(similar_programs: List[Dict]) -> List[Dict[str, Any]]:

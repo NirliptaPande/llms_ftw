@@ -1,6 +1,6 @@
 """
 Refactored VLM Prompter for ARC DSL-based solver with image support.
-New pipeline: Program Similarity → Pattern Discovery → Code Generation
+New pipeline: Program Similarity → Pattern Discovery (2 phases) → Code Generation
 """
 
 from typing import List, Tuple, Dict, Any
@@ -12,15 +12,15 @@ class VLMPrompter:
     """Builds prompts for the program-first ARC solving process"""
     
     def __init__(self):
-        self.phase1_template = self._load_phase1_template()
-        # self.phase2_template = self._load_phase2_template()
+        self.phase2a_template = self._load_phase2a_template()
+        self.phase2b_template = self._load_phase2b_template()
+        self.phase2c_dsl_section = self._get_phase2c_dsl_section()
     
-    def build_phase1_prompt(self, 
-                           task: Dict[str, Any],
-                           similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def build_phase2a_prompt(self, 
+                             task: Dict[str, Any],
+                             similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Build Phase 1 prompt: Natural Language Pattern Discovery
-        Analyzes training examples AND similar programs to discover transformation pattern.
+        Build Phase 2A prompt: Hypothesis Formation from Training Only.
         
         Args:
             task: Dict with 'train' key containing list of {'input': grid, 'output': grid}
@@ -38,10 +38,8 @@ class VLMPrompter:
             "text": "## Training Examples\n"
         })
         
-        # Format training examples (with images)
+        # Format training examples ONLY (with images)
         content_blocks.extend(self._format_training_examples(task['train']))
-        # Format test examples (input only, no output)
-        content_blocks.extend(self._format_test_examples(task['test'], include_images=True))
         
         # Add similar programs section
         content_blocks.append({
@@ -59,25 +57,81 @@ class VLMPrompter:
             "text": similar_str
         })
         
-        # Add the analysis protocol template
+        # Add the analysis protocol template (hypothesis formation)
         content_blocks.append({
             "type": "text",
-            "text": self.phase1_template
+            "text": self.phase2a_template
         })
         
         return content_blocks
     
-    def build_phase2_prompt(self,
-                            task: Dict[str, Any], 
-                           phase1_output: str,
-                           similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def build_phase2b_prompt(self,
+                             task: Dict[str, Any],
+                             hypothesis: str,
+                             similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Build Phase 2 prompt: Code Generation
-        Generates solve() function based on natural language pattern and similar programs.
+        Build Phase 2B prompt: Hypothesis Validation with Training + Test.
         
         Args:
-            task: Dict with 'train' key containing list of {'input': grid, 'output': grid}
-            phase1_output: The natural language pattern description from Phase 1
+            task: Dict with 'train' and 'test' keys
+            hypothesis: The hypothesis from Phase 2A
+            similar_programs: List of similar programs from library
+            
+        Returns:
+            List of content blocks for multimodal prompt
+        """
+        content_blocks = []
+        
+        # Add the initial hypothesis
+        content_blocks.append({
+            "type": "text",
+            "text": f"""## Initial Hypothesis
+
+{hypothesis}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## All Examples (Test + Train)
+
+Your task: Test if this hypothesis works for test examples and train input output pairs below.
+If it doesn't fit perfectly, identify what needs to be refined.
+
+"""
+        })
+        content_blocks.append({
+            "type": "text",
+            "text": "\n### Test Examples (inputs only)\n"
+        })
+        content_blocks.extend(self._format_test_examples(task['test'], include_images=True))
+        
+        # Show ALL examples now (training + test)
+        content_blocks.append({
+            "type": "text",
+            "text": "### Training Examples\n"
+        })
+        content_blocks.extend(self._format_training_examples(task['train'], include_images=True))
+        
+
+        
+        # Add validation template
+        content_blocks.append({
+            "type": "text",
+            "text": self.phase2b_template
+        })
+        
+        return content_blocks
+    
+    def build_phase2c_prompt(self,
+                             task: Dict[str, Any], 
+                             validated_pattern: str,
+                             similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Build Phase 2C prompt: Code Generation from Validated Pattern.
+        This matches the original build_phase2_prompt structure exactly.
+        
+        Args:
+            task: Dict with 'train' and 'test' keys
+            validated_pattern: The validated pattern description from Phase 2B
             similar_programs: Same list of similar programs (for reference during coding)
             
         Returns:
@@ -85,33 +139,31 @@ class VLMPrompter:
         """
         content_blocks = []
         
-        # Add header
+        # Add header (same as original)
         content_blocks.append({
             "type": "text",
             "text": "# DSL Code Generator\nGenerate a Python `solve(I)` function using ONLY the DSL primitives below.\n\n"
         })
         
-        # Add training examples section
+        # Add training examples section (same as original)
         content_blocks.append({
             "type": "text",
             "text": "## Training Examples\n"
         })
         
         # Format training examples (with images)
-        content_blocks.extend(self._format_training_examples(task['train']))
-        #Format test examples (input only, no output)
+        content_blocks.extend(self._format_training_examples(task['train'], include_images=True))
+        
+        # Format test examples (input only, no output)
         content_blocks.extend(self._format_test_examples(task['test'], include_images=True))
         
-        # Extract the key sections from Phase 1 output
-        extracted_pattern = self._extract_key_pattern_from_phase1(phase1_output)
-        
-        # Add pattern description
+        # Add pattern description (using validated pattern instead of extracting from phase1)
         content_blocks.append({
             "type": "text",
-            "text": f"\n## Natural Language Pattern Description\n{extracted_pattern}\n"
+            "text": f"\n## Natural Language Pattern Description\n{validated_pattern}\n"
         })
         
-        # Add similar programs section
+        # Add similar programs section (same as original)
         content_blocks.append({
             "type": "text",
             "text": "\n## Similar Programs for Reference\nThe following programs solved similar tasks and may provide useful patterns or approaches:\n\n"
@@ -127,44 +179,13 @@ class VLMPrompter:
             "text": similar_str
         })
         
-        # Add DSL primitives and the rest of the template
+        # Add DSL primitives and the rest of the template (same as original)
         content_blocks.append({
             "type": "text",
-            "text": self._get_phase2_dsl_section()
+            "text": self.phase2c_dsl_section
         })
         
         return content_blocks
-    
-    def _extract_key_pattern_from_phase1(self, phase1_output: str) -> str:
-        """
-        Extract the most relevant sections from Phase 1 for Phase 2.
-        Focuses on the final transformation rule and decision.
-        """
-        sections = []
-        
-        # Try to extract STEP 6: Final Transformation Rule
-        if "### STEP 6: Final Transformation Rule" in phase1_output:
-            step6_start = phase1_output.find("### STEP 6: Final Transformation Rule")
-            step6_end = phase1_output.find("━━━━━━━━━━", step6_start + 1)
-            if step6_end == -1:
-                step6_end = len(phase1_output)
-            sections.append(phase1_output[step6_start:step6_end].strip())
-        
-        # Try to extract STEP 5: Lock-in Checkpoint (the decision)
-        if "**Decision:**" in phase1_output:
-            decision_start = phase1_output.find("**Decision:**")
-            decision_end = phase1_output.find("\n\n", decision_start)
-            if decision_end == -1:
-                decision_end = phase1_output.find("━━━━━━━━━━", decision_start)
-            if decision_end != -1:
-                sections.append(phase1_output[decision_start:decision_end].strip())
-        
-        # If we got specific sections, use them
-        if sections:
-            return "\n\n".join(sections)
-        
-        # Fallback: use the entire output
-        return phase1_output
     
     def _format_test_examples(self, test_examples: List[Dict[str, Any]], include_images: bool = True) -> List[Dict[str, Any]]:
         """Format test examples as content blocks with images (input only, no output)"""
@@ -218,8 +239,9 @@ class VLMPrompter:
         content_blocks = []
         content_blocks.append({
             "type": "text",
-            "text": f"Below are {len(train_examples)} training examples follwed by the test example(s) you have to generalize to:\n for each example, the input grid is shown first, followed by the output grid. \n."
+            "text": f"Below are {len(train_examples)} training example(s):\nFor each example, the input grid is shown first, followed by the output grid.\n"
         })
+        
         for idx, example in enumerate(train_examples, 1):
             # Example header
             content_blocks.append({
@@ -260,18 +282,16 @@ class VLMPrompter:
                 "type": "text",
                 "text": f"\nASCII representation:\n{self._format_grid(example['output'], separator='|')}\n"
             })
-            
-    
+        
         return content_blocks   
-    
     
     def _format_grid(self, grid: Tuple[Tuple[int]], separator: str = "|") -> str:
         return "\n".join(separator.join(str(cell) for cell in row) for row in grid)
     
     def _format_similar_programs(self, similar_programs: List[Dict[str, Any]]) -> str:
-        """Format similar programs for Phase 1 (natural language discovery)"""
+        """Format similar programs for pattern discovery and code generation"""
         lines = []
-        lines.append("The following programs may be useful to solve the current tasks, feel free to use parts of each program, and/or combine them. Most importanly, use them as guidance:\n")
+        lines.append("The following programs may be useful to solve the current task, feel free to use parts of each program, and/or combine them. Most importantly, use them as guidance:\n")
         
         for idx, prog in enumerate(similar_programs, 1):
             similarity = prog.get('similarity', 0.0)
@@ -286,101 +306,124 @@ class VLMPrompter:
         
         return "\n".join(lines)
     
-    def _load_phase1_template(self) -> str:
+    def _load_phase2a_template(self) -> str:
+        """Template for hypothesis formation (training only)"""
         return r"""
-    ## Analysis Protocol
+## Analysis Protocol
 
-    You will analyze these examples and the test sample systematically, allowing your hypothesis to evolve 
-    naturally as you see more data - like a human solving a puzzle.
+You will analyze the examples systematically, allowing your hypothesis to evolve naturally as you see more data - like a human solving a puzzle.
 
-    **Core principle:** Look for DIFFERENCES within each example (input→output changes)
-    and SIMILARITIES across all examples (the consistent pattern).
+**Core principle:** Look for DIFFERENCES within each example (input→output changes) and SIMILARITIES across all examples (the consistent pattern).
 
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    Work through examples sequentially, reasoning in plain English about what you observe.
+Work through examples sequentially, reasoning in simple English about what you observe.
 
-    Step 1.1: First Example Analysis
-    Given: Input 1 → Output 1
+**Step 1: First Example Analysis**
+Given: Input 1 → Output 1
 
-    <observation_1>
-    Describe what you see:
-    - What's the size/shape change?
-    - What colors changed? 
-    - What geometric transformations occurred?
-    - What patterns do you notice?
-    </observation_1>
+<observation_1>
+Describe what you see:
+- What's the size/shape change?
+- What colors changed? 
+- What geometric transformations occurred?
+- What patterns do you notice?
+</observation_1>
 
-    <hypothesis_1>
-    State your initial guess about the transformation rule in natural language.
-    Example: "The grid appears to be flipped horizontally"
-    </hypothesis_1>
+<hypothesis_1>
+State your initial guess about the transformation rule in natural language.
+Example: "The grid appears to be flipped horizontally"
+</hypothesis_1>
 
-    Step 1.2: Second Example Validation
-    Given: Input 2 → Output 2
+**Step 2: Second Example Validation**
+Given: Input 2 → Output 2
 
-    <observation_2>
-    - Does your hypothesis from Example 1 still hold?
-    - What's similar to Example 1? 
-    - What's different from Example 1?
-    </observation_2>
+<observation_2>
+- Does your hypothesis from Example 1 still hold?
+- What's similar to Example 1? 
+- What's different from Example 1?
+</observation_2>
 
-    <hypothesis_2>
-    Refine your hypothesis:
-    - If it still works: Confirm and strengthen
-    - If it breaks: Revise with a more general pattern
-    Example: "Actually, it's mirrored horizontally, THEN the original is stacked on top"
-    </hypothesis_2>
+<hypothesis_2>
+Refine your hypothesis:
+- If it still works: Confirm and strengthen
+- If it breaks: Revise with a more general pattern
+Example: "Actually, it's mirrored horizontally, THEN the original is stacked on top"
+</hypothesis_2>
 
-    Step 1.3: Third Example Confirmation
-    Given: Input 3 → Output 3
+**Step 3: Third Example Confirmation**
+Given: Input 3 → Output 3
 
-    <observation_3>
-    - Does hypothesis_2 work here?
-    - Any new edge cases or variations?
-    </observation_3>
+<observation_3>
+- Does hypothesis_2 work here?
+- Any new edge cases or variations?
+</observation_3>
 
-    <hypothesis_3>
-    Final refined hypothesis in natural language.
-    </hypothesis_3>
+<hypothesis_3>
+Final refined hypothesis in natural language.
+</hypothesis_3>
 
-    Step 1.N: Additional Examples
-    Continue for all remaining examples...
+**Step N: Additional Examples**
+Continue for all remaining examples...
 
-    Step 2.1: First Test Example Confirmation
-    Given: Test Input 1
-    <observation_test1>
-    - Does hypothesis_training work here?
-    - Any new edge cases or variations?
-    </observation_test1>
+**Final Step: Pattern Synthesis**
+<pattern_summary>
+In plain English, the transformation rule is:
+- [Short description of relevant observations]
+- [First operation in natural language]
+- [Second operation in natural language]
+- [Any conditions or special cases]
 
-    <hypothesis_test1>
-    Test hypothesis after seeing test example 1.
-    </hypothesis_test1>
+Edge cases to consider:
+- [Any variations you noticed]
 
-    Step 2.N: Additional Test Examples, if present
-    Continue for all remaining test cases...
+Why this works:
+- [Brief explanation about WHY this pattern makes sense]
 
-    Step 2.Final: Pattern Synthesis
-    <pattern_summary>
-    In plain English, the transformation rule is:
-    - [First operation in natural language]
-    - [Second operation in natural language]
-    - [Any conditions or special cases]
+Confidence level: [0-100%]
+</pattern_summary>
 
-    Edge cases to consider:
-    - [Any variations you noticed]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    Why this works:
-    - [Brief explanation about WHY this pattern makes sense]
-    </pattern_summary>
-
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    Begin your analysis:"""
+Begin your analysis:"""
     
-    def _get_phase2_dsl_section(self) -> str:
-        """Phase 2: DSL Primitives and Code Generation Instructions"""
+    def _load_phase2b_template(self) -> str:
+        """Template for hypothesis validation (all examples)"""
+        return r"""
+## Validation Protocol
+
+Check if the initial hypothesis fits ALL examples (training + test inputs).
+Your goal: Confirm the hypothesis or refine it as needed.
+
+**For each test input:**
+<test_check_N>
+Does the hypothesis make sense for Test Input N?
+- Consider: size, colors, patterns, edge cases
+- Any concerns or refinements needed?
+</test_check_N>
+
+Does it explain all the test and training examples perfectly?
+
+**Final Validation:**
+<validated_pattern>
+After checking all examples:
+
+**Status:** [CONFIRMED / NEEDS REFINEMENT]
+
+**Final Pattern Description:**
+[If confirmed: restate the pattern cleanly]
+[If refined: provide the improved pattern with explanations of what changed]
+
+**Confidence:** [0-100%]
+
+**Reasoning:** [Why this pattern works for all examples]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Begin validation:"""
+    
+    def _get_phase2c_dsl_section(self) -> str:
+        """Phase 2C: DSL Primitives and Code Generation Instructions (EXACT copy from original)"""
         return """
 ## DSL Primitives
 

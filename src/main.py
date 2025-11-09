@@ -136,7 +136,8 @@ def phase1_find_similar(
     task_id: str,
     library: ProgramLibrary,
     timeout: int = 2,
-    verbose: bool = True
+    verbose: bool = True,
+    similar: bool = True
 ) -> Phase1Result:
     """Phase 1: Find similar programs by execution."""
     try:
@@ -145,7 +146,8 @@ def phase1_find_similar(
             top_k=5,
             min_similarity=0.1,
             timeout=timeout,
-            verbose=verbose
+            verbose=verbose,
+            similar=similar
         )
         
         best_library_score = 0.0
@@ -215,9 +217,10 @@ def process_directory(
     library: ProgramLibrary,
     timeout: int = 2,
     max_find_similar_workers: int = 4,
-    k_samples: int = 1,
+    k_samples: int = 2,
     log_dir: str = "logs",
-    verbose: bool = True
+    verbose: bool = True,
+    similar: bool = True
 ) -> List[TaskResult]:
     """
     Process all tasks with fully batched API calls and K-sample diversity.
@@ -277,7 +280,7 @@ def process_directory(
     phase1_results = [None] * len(tasks_data)
 
     for idx, (task_id, task) in enumerate(tasks_data):
-        result = phase1_find_similar(task, task_id, library, timeout, verbose)
+        result = phase1_find_similar(task, task_id, library, timeout, verbose, similar)
         phase1_results[idx] = result
     
     time_phase1 = time.time()
@@ -485,7 +488,7 @@ Combat this by evolving your hypothesis"""
                 continue
             
             try:
-                score, test_results = test_program(generated_code, task)
+                score, test_results = test_program(generated_code, task, testing='train')
                 all_sample_scores.append((k, score, generated_code, None))
                 
                 if score > best_score:
@@ -498,7 +501,7 @@ Combat this by evolving your hypothesis"""
                 all_sample_scores.append((k, 0.0, None, str(e)))
         
         # Compare with library fallback
-        final_score = best_score
+        final_score,_ = test_program(best_program, task, testing='test')
         final_program = best_program
         final_hypothesis = best_hypothesis
         final_validation = best_validation
@@ -657,18 +660,18 @@ def main():
     library = ProgramLibrary()
     
     results = process_directory(
-        data_dir='data_v2/evaluation',#TODO change data dir
+        data_dir='data_v1/eval_size_10',#TODO change data dir
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,
         library=library,
         timeout=2,
         max_find_similar_workers= 56,
-        log_dir="logs_old_dsl_fewshot_k",#TODO change log dir
+        log_dir="test_1",#TODO change log dir
         verbose=False
     )
     
-    save_results(results, output_dir='results/old_dsl_fewshot_k')#TODO change result dir
+    save_results(results, output_dir='results/test_1')#TODO change result dir
 
 
 if __name__ == "__main__":

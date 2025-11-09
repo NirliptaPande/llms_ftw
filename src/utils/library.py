@@ -313,7 +313,8 @@ class ProgramLibrary:
                     min_similarity: float = 0.0,
                     n_workers: int = None,
                     timeout: int = 2,
-                    verbose: bool = False) -> List[Dict]:
+                    verbose: bool = False,
+                    similar: bool = True) -> List[Dict]:
         """
         Find programs based on execution similarity (parallelized).
         
@@ -439,7 +440,11 @@ class ProgramLibrary:
         
         # Sort both lists by similarity
         perfect_programs.sort(key=lambda x: x['similarity'], reverse=True)
-        other_programs.sort(key=lambda x: x['similarity'], reverse=True)
+        if similar:
+            other_programs.sort(key=lambda x: x['similarity'], reverse=True)
+        else:
+            import random
+            random.shuffle(other_programs)
         
         print(f"\n=== Results ===", flush=True)
         print(f"Programs with perfect examples: {len(perfect_programs)}", flush=True)

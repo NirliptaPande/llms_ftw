@@ -62,11 +62,14 @@ class Phase1Result:
     best_library_program: Optional[str]
     perfect_match_found: bool
     error: Optional[str] = None
+import signal
 
-
-def test_program(program_code: str, task: Dict) -> Tuple[float, List[Tuple[Any, Any, bool]]]:
+def test_program(program_code: str, task: Dict, testing: str='test') -> Tuple[float, List[Tuple[Any, Any, bool]]]:
     """Test a program against task test examples."""
     namespace = globals().copy()
+    
+    def timeout_handler(signum, frame):
+        raise TimeoutError("Execution timed out")
     
     try:
         exec(program_code, namespace)
@@ -78,17 +81,30 @@ def test_program(program_code: str, task: Dict) -> Tuple[float, List[Tuple[Any, 
         scores = []
         results = []
         
-        for example in task['test']:
+        for example in task[testing]:
             inp = example['input']
             expected = example['output']
             if isinstance(inp, list):
                 inp = tuple(tuple(row) for row in inp)
             try:
+                # Set up the timeout
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(2)  # 2 second timeout
+                
                 actual = solve_fn(inp)
+                
+                # Cancel the alarm
+                signal.alarm(0)
+                
                 score = calculate_grid_similarity(actual, expected)
                 scores.append(score)
                 results.append((expected, actual, score == 1.0))
+            except TimeoutError:
+                signal.alarm(0)  # Cancel the alarm
+                scores.append(0.0)
+                results.append((expected, None, False))
             except Exception as e:
+                signal.alarm(0)  # Cancel the alarm
                 scores.append(0.0)
                 results.append((expected, None, False))
         
@@ -97,7 +113,6 @@ def test_program(program_code: str, task: Dict) -> Tuple[float, List[Tuple[Any, 
         
     except Exception as e:
         return 0.0, []
-
 
 def extract_code_from_response(response: str) -> Optional[str]:
     """Extract Python code from LLM response."""
@@ -200,18 +215,21 @@ def process_directory(
     library: ProgramLibrary,
     timeout: int = 2,
     max_find_similar_workers: int = 4,
+    k_samples: int = 1,
     log_dir: str = "logs",
     verbose: bool = True
 ) -> List[TaskResult]:
     """
-    Process all tasks with fully batched API calls.
+    Process all tasks with fully batched API calls and K-sample diversity.
     
     Strategy:
     1. Run find_similar in parallel for all tasks
-    2. Batch ALL phase2a prompts → send in parallel
-    3. Batch ALL phase2b prompts → send in parallel
-    4. Batch ALL phase2c prompts → send in parallel
-    5. Execute all code sequentially
+    2. For each task, generate K samples:
+       - Batch ALL phase2a prompts (K per task) → send in parallel
+       - Batch ALL phase2b prompts (K per task) → send in parallel
+       - Batch ALL phase2c prompts (K per task) → send in parallel
+    3. Test all K programs per task and select the best
+    4. Execute all code sequentially
     """
     data_path = Path(data_dir)
     
@@ -227,9 +245,10 @@ def process_directory(
     
     if verbose:
         print(f"\n{'='*80}", flush=True)
-        print(f"BATCHED PIPELINE - ALL API CALLS IN PARALLEL", flush=True)
+        print(f"K-SAMPLE BATCHED PIPELINE - {k_samples} SAMPLES PER TASK", flush=True)
         print(f"{'='*80}", flush=True)
         print(f"Total tasks: {len(json_files)}", flush=True)
+        print(f"Total API calls per phase: {len(json_files)} × {k_samples}", flush=True)
         print(f"{'='*80}\n", flush=True)
     
     # Load all tasks
@@ -256,39 +275,38 @@ def process_directory(
     
     time_start = time.time()
     phase1_results = [None] * len(tasks_data)
-    
-    # def run_phase1(idx, task_id, task, verbose=verbose):
-    #     return idx, phase1_find_similar(task, task_id, library, timeout, verbose)
-    
-    time_start = time.time()
-    phase1_results = [None] * len(tasks_data)
 
     for idx, (task_id, task) in enumerate(tasks_data):
         result = phase1_find_similar(task, task_id, library, timeout, verbose)
         phase1_results[idx] = result
-        
-
+    
     time_phase1 = time.time()
-
     print(f"Phase 1 complete: {time_phase1 - time_start:.1f}s\n", flush=True)
     
     # ========================================================================
-    # PHASE 2A: Batch all prompts
+    # PHASE 2A: Batch all prompts (K samples per task)
     # ========================================================================
-
     if verbose:
-        print(f"Phase 2A: Building prompts...", flush=True)
+        print(f"Phase 2A: Building prompts ({k_samples} samples per task)...", flush=True)
     
     phase2a_prompts = []
+    phase2a_task_sample_pairs = []  # List of (task_idx, sample_idx)
     phase2a_indices = []
+    
+    # Initialize 2D results structure
+    phase2a_results = [[None] * k_samples for _ in range(len(tasks_data))]
     
     for idx, (phase1_result, (task_id, task)) in enumerate(zip(phase1_results, tasks_data)):
         if phase1_result.perfect_match_found or phase1_result.error:
             continue
         
-        prompt = prompter.build_phase2a_prompt(task, phase1_result.similar_programs)
-        phase2a_prompts.append(prompt)
         phase2a_indices.append(idx)
+        
+        # Create K copies of the prompt for diversity
+        for k in range(k_samples):
+            prompt = prompter.build_phase2a_prompt(task, phase1_result.similar_programs)
+            phase2a_prompts.append(prompt)
+            phase2a_task_sample_pairs.append((idx, k))
     
     if verbose:
         print(f"Sending {len(phase2a_prompts)} prompts to API...", flush=True)
@@ -304,39 +322,41 @@ Combat this by evolving your hypothesis as you see each training example."""
             futures = [executor.submit(vlm_client_phase1.query, p, system_prompt) for p in phase2a_prompts]
             phase2a_outputs = [f.result() for f in futures]
     
-    # Store outputs
-    phase2a_results = [None] * len(tasks_data)
-    for idx, output in zip(phase2a_indices, phase2a_outputs):
-        phase2a_results[idx] = output
+    # Store outputs in 2D structure
+    for (task_idx, sample_idx), output in zip(phase2a_task_sample_pairs, phase2a_outputs):
+        phase2a_results[task_idx][sample_idx] = output
         
-        task_id = tasks_data[idx][0]
-        log_path = os.path.join(log_dir, f"{task_id}_phase2a_hypothesis.txt")
+        task_id = tasks_data[task_idx][0]
+        log_path = os.path.join(log_dir, f"{task_id}_sample{sample_idx}_phase2a_hypothesis.txt")
         with open(log_path, 'w') as f:
-            f.write(f"Task ID: {task_id}\n{'='*80}\n")
-            f.write("PHASE 2A: HYPOTHESIS FORMATION\n{'='*80}\n\n")
+            f.write(f"Task ID: {task_id} (Sample {sample_idx}/{k_samples-1})\n{'='*80}\n")
+            f.write(f"PHASE 2A: HYPOTHESIS FORMATION\n{'='*80}\n\n")
             f.write(output)
     
     time_phase2a = time.time()
-
     print(f"Phase 2A complete: {time_phase2a - time_phase1:.1f}s\n", flush=True)
     
     # ========================================================================
-    # PHASE 2B: Batch all prompts
+    # PHASE 2B: Batch all prompts (K samples per task)
     # ========================================================================
     if verbose:
-        print(f"Phase 2B: Building prompts...", flush=True)
+        print(f"Phase 2B: Building prompts ({k_samples} samples per task)...", flush=True)
     
     phase2b_prompts = []
-    phase2b_indices = []
+    phase2b_task_sample_pairs = []
+    phase2b_indices = phase2a_indices.copy()
     
-    for idx in phase2a_indices:
+    phase2b_results = [[None] * k_samples for _ in range(len(tasks_data))]
+    
+    for idx in phase2b_indices:
         task_id, task = tasks_data[idx]
         phase1_result = phase1_results[idx]
-        hypothesis = extract_hypothesis_from_response(phase2a_results[idx])
         
-        prompt = prompter.build_phase2b_prompt(task, hypothesis, phase1_result.similar_programs)
-        phase2b_prompts.append(prompt)
-        phase2b_indices.append(idx)
+        for k in range(k_samples):
+            hypothesis = extract_hypothesis_from_response(phase2a_results[idx][k])
+            prompt = prompter.build_phase2b_prompt(task, hypothesis, phase1_result.similar_programs)
+            phase2b_prompts.append(prompt)
+            phase2b_task_sample_pairs.append((idx, k))
     
     if verbose:
         print(f"Sending {len(phase2b_prompts)} prompts to API...", flush=True)
@@ -354,40 +374,42 @@ Combat this by evolving your hypothesis"""
             phase2b_outputs = [f.result() for f in futures]
     
     # Store outputs
-    phase2b_results = [None] * len(tasks_data)
-    for idx, output in zip(phase2b_indices, phase2b_outputs):
-        phase2b_results[idx] = output
+    for (task_idx, sample_idx), output in zip(phase2b_task_sample_pairs, phase2b_outputs):
+        phase2b_results[task_idx][sample_idx] = output
         
-        task_id = tasks_data[idx][0]
-        hypothesis = extract_hypothesis_from_response(phase2a_results[idx])
-        log_path = os.path.join(log_dir, f"{task_id}_phase2b_validation.txt")
+        task_id = tasks_data[task_idx][0]
+        hypothesis = extract_hypothesis_from_response(phase2a_results[task_idx][sample_idx])
+        log_path = os.path.join(log_dir, f"{task_id}_sample{sample_idx}_phase2b_validation.txt")
         with open(log_path, 'w') as f:
-            f.write(f"Task ID: {task_id}\n{'='*80}\n")
+            f.write(f"Task ID: {task_id} (Sample {sample_idx}/{k_samples-1})\n{'='*80}\n")
             f.write(f"PHASE 2B: HYPOTHESIS VALIDATION\n{'='*80}\n\n")
             f.write(f"INITIAL HYPOTHESIS:\n{'-'*80}\n{hypothesis}\n{'-'*80}\n\n")
             f.write(f"VALIDATION OUTPUT:\n{'-'*80}\n{output}")
     
     time_phase2b = time.time()
-
     print(f"Phase 2B complete: {time_phase2b - time_phase2a:.1f}s\n", flush=True)
     
     # ========================================================================
-    # PHASE 2C: Batch all prompts
+    # PHASE 2C: Batch all prompts (K samples per task)
     # ========================================================================
     if verbose:
-        print(f"Phase 2C: Building prompts...", flush=True)
+        print(f"Phase 2C: Building prompts ({k_samples} samples per task)...", flush=True)
     
     phase2c_prompts = []
-    phase2c_indices = []
+    phase2c_task_sample_pairs = []
+    phase2c_indices = phase2b_indices.copy()
     
-    for idx in phase2b_indices:
+    phase2c_results = [[None] * k_samples for _ in range(len(tasks_data))]
+    
+    for idx in phase2c_indices:
         task_id, task = tasks_data[idx]
         phase1_result = phase1_results[idx]
-        validated_pattern = extract_validated_pattern_from_response(phase2b_results[idx])
         
-        prompt = prompter.build_phase2c_prompt(task, validated_pattern, phase1_result.similar_programs, few_shot=True)
-        phase2c_prompts.append(prompt)
-        phase2c_indices.append(idx)
+        for k in range(k_samples):
+            validated_pattern = extract_validated_pattern_from_response(phase2b_results[idx][k])
+            prompt = prompter.build_phase2c_prompt(task, validated_pattern, phase1_result.similar_programs, few_shot=True)
+            phase2c_prompts.append(prompt)
+            phase2c_task_sample_pairs.append((idx, k))
     
     if verbose:
         print(f"Sending {len(phase2c_prompts)} prompts to API...", flush=True)
@@ -400,18 +422,23 @@ Combat this by evolving your hypothesis"""
             futures = [executor.submit(vlm_client_phase2.query, p, system_prompt) for p in phase2c_prompts]
             phase2c_outputs = [f.result() for f in futures]
     
+    # Store outputs
+    for (task_idx, sample_idx), output in zip(phase2c_task_sample_pairs, phase2c_outputs):
+        phase2c_results[task_idx][sample_idx] = output
+    
     time_phase2c = time.time()
     print(f"Phase 2C complete: {time_phase2c - time_phase2b:.1f}s\n", flush=True)
     
     # ========================================================================
-    # CODE EXECUTION
+    # CODE EXECUTION & BEST-OF-K SELECTION
     # ========================================================================
     if verbose:
-        print(f"Testing programs...", flush=True)
+        print(f"Testing programs (selecting best of {k_samples})...", flush=True)
     
     results = []
     successful = 0
     total_score = 0.0
+    sample_selection_counts = [0] * k_samples  # Track which samples win
     
     for idx, (task_id, task) in enumerate(tasks_data):
         phase1_result = phase1_results[idx]
@@ -434,7 +461,14 @@ Combat this by evolving your hypothesis"""
                 print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (error)", flush=True)
             continue
         
-        # Get generated code
+        # Test all K samples and select best
+        best_score = 0.0
+        best_program = None
+        best_sample_idx = -1
+        best_hypothesis = None
+        best_validation = None
+        all_sample_scores = []
+        
         if idx not in phase2c_indices:
             result = TaskResult(task_id, False, 0.0, error="No code generated")
             results.append(result)
@@ -442,75 +476,83 @@ Combat this by evolving your hypothesis"""
                 print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (no code)", flush=True)
             continue
         
-        output_idx = phase2c_indices.index(idx)
-        generated_code = extract_code_from_response(phase2c_outputs[output_idx])
+        # Test each of the K samples
+        for k in range(k_samples):
+            generated_code = extract_code_from_response(phase2c_results[idx][k])
+            
+            if not generated_code:
+                all_sample_scores.append((k, 0.0, None, "extraction_failed"))
+                continue
+            
+            try:
+                score, test_results = test_program(generated_code, task)
+                all_sample_scores.append((k, score, generated_code, None))
+                
+                if score > best_score:
+                    best_score = score
+                    best_program = generated_code
+                    best_sample_idx = k
+                    best_hypothesis = phase2a_results[idx][k]
+                    best_validation = phase2b_results[idx][k]
+            except Exception as e:
+                all_sample_scores.append((k, 0.0, None, str(e)))
         
-        if not generated_code:
-            if phase1_result.best_library_program and phase1_result.best_library_score > 0.5:
-                result = TaskResult(
-                    task_id, False, phase1_result.best_library_score,
-                    phase1_result.best_library_program,
-                    phase2a_results[idx], phase2b_results[idx],
-                    "Code extraction failed, library fallback"
-                )
+        # Compare with library fallback
+        final_score = best_score
+        final_program = best_program
+        final_hypothesis = best_hypothesis
+        final_validation = best_validation
+        
+        if best_score > 0:
+            sample_selection_counts[best_sample_idx] += 1
+        
+        if phase1_result.best_library_score > best_score:
+            final_score = phase1_result.best_library_score
+            final_program = phase1_result.best_library_program
+            best_sample_idx = -1  # Indicate library fallback
+        
+        # Add to library if successful
+        success = final_score == 1.0
+        if success and final_program == best_program:
+            namespace = globals().copy()
+            exec(final_program, namespace)
+            if 'solve' in namespace:
+                library.add(task_id, final_program)
+        
+        result = TaskResult(
+            task_id, success, final_score, final_program,
+            final_hypothesis, final_validation
+        )
+        
+        if success:
+            successful += 1
+        total_score += final_score
+        
+        # Detailed logging
+        log_path = os.path.join(log_dir, f"{task_id}_selection_summary.txt")
+        with open(log_path, 'w') as f:
+            f.write(f"Task ID: {task_id}\n{'='*80}\n")
+            f.write(f"K-SAMPLE SELECTION SUMMARY\n{'='*80}\n\n")
+            f.write(f"Sample Scores:\n{'-'*80}\n")
+            for k, score, code, error in all_sample_scores:
+                status = "✓" if score == 1.0 else "✗"
+                if error:
+                    f.write(f"  Sample {k}: {score:.2f} {status} (Error: {error})\n")
+                else:
+                    f.write(f"  Sample {k}: {score:.2f} {status}\n")
+            f.write(f"{'-'*80}\n\n")
+            if best_sample_idx >= 0:
+                f.write(f"SELECTED: Sample {best_sample_idx} (Score: {best_score:.2f})\n")
             else:
-                result = TaskResult(
-                    task_id, False, 0.0, None,
-                    phase2a_results[idx], phase2b_results[idx],
-                    "Code extraction failed"
-                )
-            results.append(result)
-            total_score += result.score
-            if verbose:
-                print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: {result.score:.2f} (extract fail)", flush=True)
-            continue
+                f.write(f"SELECTED: Library fallback (Score: {final_score:.2f})\n")
+            f.write(f"{'-'*80}\n\n")
+            if best_program:
+                f.write(f"BEST CODE:\n{'-'*80}\n{best_program}\n")
         
-        # Test code
-        try:
-            score, test_results = test_program(generated_code, task)
-            success = score == 1.0
-            
-            final_program = generated_code
-            final_score = score
-            
-            if not success and phase1_result.best_library_score > score:
-                final_program = phase1_result.best_library_program
-                final_score = phase1_result.best_library_score
-            
-            if success:
-                namespace = globals().copy()
-                exec(final_program, namespace)
-                if 'solve' in namespace:
-                    library.add(task_id, final_program)
-            
-            result = TaskResult(
-                task_id, success, final_score, final_program,
-                phase2a_results[idx], phase2b_results[idx]
-            )
-            
-            if success:
-                successful += 1
-            total_score += final_score
-            
-            # Log
-            log_path = os.path.join(log_dir, f"{task_id}_phase2c_results.txt")
-            with open(log_path, 'w') as f:
-                f.write(f"Task ID: {task_id}\n{'='*80}\n")
-                f.write(f"CODE:\n{'-'*80}\n{generated_code}\n{'-'*80}\n\n")
-                f.write(f"SCORE: {score:.2f}\n")
-            
-            if verbose:
-                status = "✓" if success else "✗"
-                print(f"{status} [{idx+1}/{len(tasks_data)}] {task_id}: {final_score:.2f}", flush=True)
-            
-        except Exception as e:
-            result = TaskResult(
-                task_id, False, 0.0, None,
-                phase2a_results[idx], phase2b_results[idx],
-                str(e)
-            )
-            if verbose:
-                print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (error)", flush=True)
+        if verbose:
+            status = "✓" if success else "✗"
+            sample_info = f"sample{best_sample_idx}" if best_sample_idx >= 0 else "library"
+            print(f"{status} [{idx+1}/{len(tasks_data)}] {task_id}: {final_score:.2f} ({sample_info})", flush=True)
         
         results.append(result)
     
@@ -521,11 +563,17 @@ Combat this by evolving your hypothesis"""
     print(f"TIME BREAKDOWN", flush=True)
     print(f"{'='*80}", flush=True)
     print(f"Phase 1 (find_similar): {time_phase1 - time_start:.1f}s", flush=True)
-    print(f"Phase 2A (hypothesis): {time_phase2a - time_phase1:.1f}s", flush=True)
-    print(f"Phase 2B (validation): {time_phase2b - time_phase2a:.1f}s", flush=True)
-    print(f"Phase 2C (code gen): {time_phase2c - time_phase2b:.1f}s", flush=True)
-    print(f"Code execution: {time_execution - time_phase2c:.1f}s", flush=True)
+    print(f"Phase 2A (hypothesis × {k_samples}): {time_phase2a - time_phase1:.1f}s", flush=True)
+    print(f"Phase 2B (validation × {k_samples}): {time_phase2b - time_phase2a:.1f}s", flush=True)
+    print(f"Phase 2C (code gen × {k_samples}): {time_phase2c - time_phase2b:.1f}s", flush=True)
+    print(f"Code execution & selection: {time_execution - time_phase2c:.1f}s", flush=True)
     print(f"Total: {time_execution - time_start:.1f}s", flush=True)
+    print(f"\n{'='*80}", flush=True)
+    print(f"SAMPLE SELECTION STATS", flush=True)
+    print(f"{'='*80}", flush=True)
+    for k in range(k_samples):
+        pct = 100 * sample_selection_counts[k] / len(tasks_data) if len(tasks_data) > 0 else 0
+        print(f"Sample {k} selected: {sample_selection_counts[k]} times ({pct:.1f}%)", flush=True)
     print(f"\n{'='*80}", flush=True)
     print(f"RESULTS", flush=True)
     print(f"{'='*80}", flush=True)
@@ -534,7 +582,6 @@ Combat this by evolving your hypothesis"""
     print(f"{'='*80}\n", flush=True)
 
     return results
-
 
 def save_results(results: List[TaskResult], output_dir: str = 'results') -> None:
     """Save results to JSON and CSV files."""
@@ -610,18 +657,18 @@ def main():
     library = ProgramLibrary()
     
     results = process_directory(
-        data_dir='data_v1/eval_size_10',#TODO change data dir
+        data_dir='data_v2/evaluation',#TODO change data dir
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,
         library=library,
         timeout=2,
         max_find_similar_workers= 56,
-        log_dir="logs_old_dsl_fewshot",#TODO change log dir
+        log_dir="logs_old_dsl_fewshot_k",#TODO change log dir
         verbose=False
     )
     
-    save_results(results, output_dir='results/old_dsl_fewshot')#TODO change result dir
+    save_results(results, output_dir='results/old_dsl_fewshot_k')#TODO change result dir
 
 
 if __name__ == "__main__":

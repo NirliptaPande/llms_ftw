@@ -21,7 +21,7 @@ class VLMConfig:
     temperature: float = 0.7
     timeout: int = 240
     max_retries: int = 1
-    retry_delay: float = 1.0
+    retry_delay: float = 60.0
     save_prompts: bool = False
     prompt_log_dir: str = "prompts"
 

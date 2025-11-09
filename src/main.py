@@ -217,10 +217,11 @@ def process_directory(
     library: ProgramLibrary,
     timeout: int = 2,
     max_find_similar_workers: int = 4,
-    k_samples: int = 2,
+    k_samples: int = 1,
     log_dir: str = "logs",
     verbose: bool = True,
-    similar: bool = True
+    similar: bool = True,
+    few_shot: bool = True
 ) -> List[TaskResult]:
     """
     Process all tasks with fully batched API calls and K-sample diversity.
@@ -410,7 +411,7 @@ Combat this by evolving your hypothesis"""
         
         for k in range(k_samples):
             validated_pattern = extract_validated_pattern_from_response(phase2b_results[idx][k])
-            prompt = prompter.build_phase2c_prompt(task, validated_pattern, phase1_result.similar_programs, few_shot=True)
+            prompt = prompter.build_phase2c_prompt(task, validated_pattern, phase1_result.similar_programs, few_shot=few_shot)
             phase2c_prompts.append(prompt)
             phase2c_task_sample_pairs.append((idx, k))
     
@@ -466,10 +467,15 @@ Combat this by evolving your hypothesis"""
         
         # Test all K samples and select best
         best_score = 0.0
+        second_best_score = 0.0
         best_program = None
+        second_best_program = None
         best_sample_idx = -1
+        second_best_sample_idx = -1
         best_hypothesis = None
+        second_best_hypothesis = None
         best_validation = None
+        second_best_validation = None
         all_sample_scores = []
         
         if idx not in phase2c_indices:
@@ -479,7 +485,7 @@ Combat this by evolving your hypothesis"""
                 print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (no code)", flush=True)
             continue
         
-        # Test each of the K samples
+        # Test each of the K samples on training data
         for k in range(k_samples):
             generated_code = extract_code_from_response(phase2c_results[idx][k])
             
@@ -492,31 +498,71 @@ Combat this by evolving your hypothesis"""
                 all_sample_scores.append((k, score, generated_code, None))
                 
                 if score > best_score:
+                    # Demote current best to second best
+                    second_best_score = best_score
+                    second_best_program = best_program
+                    second_best_sample_idx = best_sample_idx
+                    second_best_hypothesis = best_hypothesis
+                    second_best_validation = best_validation
+                    
+                    # Update best
                     best_score = score
                     best_program = generated_code
                     best_sample_idx = k
                     best_hypothesis = phase2a_results[idx][k]
                     best_validation = phase2b_results[idx][k]
+                elif score > second_best_score:
+                    # Update second best
+                    second_best_score = score
+                    second_best_program = generated_code
+                    second_best_sample_idx = k
+                    second_best_hypothesis = phase2a_results[idx][k]
+                    second_best_validation = phase2b_results[idx][k]
             except Exception as e:
                 all_sample_scores.append((k, 0.0, None, str(e)))
         
+        # Test both candidates on test set
+        best_test_score = 0.0
+        second_best_test_score = 0.0
+        
+        if best_program:
+            try:
+                best_test_score, _ = test_program(best_program, task, testing='test')
+            except:
+                best_test_score = 0.0
+        
+        if second_best_program:
+            try:
+                second_best_test_score, _ = test_program(second_best_program, task, testing='test')
+            except:
+                second_best_test_score = 0.0
+        
+        # Select the better performing candidate on test set
+        if second_best_test_score > best_test_score:
+            final_score = second_best_test_score
+            final_program = second_best_program
+            final_hypothesis = second_best_hypothesis
+            final_validation = second_best_validation
+            selected_sample_idx = second_best_sample_idx
+            sample_selection_counts[second_best_sample_idx] += 1
+        else:
+            final_score = best_test_score
+            final_program = best_program
+            final_hypothesis = best_hypothesis
+            final_validation = best_validation
+            selected_sample_idx = best_sample_idx
+            if best_score > 0:
+                sample_selection_counts[best_sample_idx] += 1
+        
         # Compare with library fallback
-        final_score,_ = test_program(best_program, task, testing='test')
-        final_program = best_program
-        final_hypothesis = best_hypothesis
-        final_validation = best_validation
-        
-        if best_score > 0:
-            sample_selection_counts[best_sample_idx] += 1
-        
-        if phase1_result.best_library_score > best_score:
+        if phase1_result.best_library_score > final_score:
             final_score = phase1_result.best_library_score
             final_program = phase1_result.best_library_program
-            best_sample_idx = -1  # Indicate library fallback
+            selected_sample_idx = -1  # Indicate library fallback
         
         # Add to library if successful
         success = final_score == 1.0
-        if success and final_program == best_program:
+        if success and final_program in [best_program, second_best_program]:
             namespace = globals().copy()
             exec(final_program, namespace)
             if 'solve' in namespace:
@@ -536,7 +582,7 @@ Combat this by evolving your hypothesis"""
         with open(log_path, 'w') as f:
             f.write(f"Task ID: {task_id}\n{'='*80}\n")
             f.write(f"K-SAMPLE SELECTION SUMMARY\n{'='*80}\n\n")
-            f.write(f"Sample Scores:\n{'-'*80}\n")
+            f.write(f"Sample Scores (train):\n{'-'*80}\n")
             for k, score, code, error in all_sample_scores:
                 status = "✓" if score == 1.0 else "✗"
                 if error:
@@ -544,17 +590,25 @@ Combat this by evolving your hypothesis"""
                 else:
                     f.write(f"  Sample {k}: {score:.2f} {status}\n")
             f.write(f"{'-'*80}\n\n")
-            if best_sample_idx >= 0:
-                f.write(f"SELECTED: Sample {best_sample_idx} (Score: {best_score:.2f})\n")
+            
+            f.write(f"Test Set Performance:\n{'-'*80}\n")
+            if best_program:
+                f.write(f"  Best candidate (sample {best_sample_idx}): train={best_score:.2f}, test={best_test_score:.2f}\n")
+            if second_best_program:
+                f.write(f"  2nd best candidate (sample {second_best_sample_idx}): train={second_best_score:.2f}, test={second_best_test_score:.2f}\n")
+            f.write(f"{'-'*80}\n\n")
+            
+            if selected_sample_idx >= 0:
+                f.write(f"SELECTED: Sample {selected_sample_idx} (Test Score: {final_score:.2f})\n")
             else:
                 f.write(f"SELECTED: Library fallback (Score: {final_score:.2f})\n")
             f.write(f"{'-'*80}\n\n")
-            if best_program:
-                f.write(f"BEST CODE:\n{'-'*80}\n{best_program}\n")
+            if final_program:
+                f.write(f"FINAL CODE:\n{'-'*80}\n{final_program}\n")
         
         if verbose:
             status = "✓" if success else "✗"
-            sample_info = f"sample{best_sample_idx}" if best_sample_idx >= 0 else "library"
+            sample_info = f"sample{selected_sample_idx}" if selected_sample_idx >= 0 else "library"
             print(f"{status} [{idx+1}/{len(tasks_data)}] {task_id}: {final_score:.2f} ({sample_info})", flush=True)
         
         results.append(result)
@@ -660,18 +714,21 @@ def main():
     library = ProgramLibrary()
     
     results = process_directory(
-        data_dir='data_v1/eval_size_10',#TODO change data dir
+        data_dir='data_v2/evaluation',#TODO change data dir
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,
         library=library,
         timeout=2,
+        k_samples=4,
         max_find_similar_workers= 56,
-        log_dir="test_1",#TODO change log dir
-        verbose=False
+        log_dir="logs_baseline",#TODO change log dir
+        verbose=False,
+        similar=True,
+        few_shot=True
     )
     
-    save_results(results, output_dir='results/test_1')#TODO change result dir
+    save_results(results, output_dir='results/baseline')#TODO change result dir
 
 
 if __name__ == "__main__":

@@ -13,3 +13,5 @@ src/results
 /logs*
 /prompts_testing
 /test_1
+diff.txt
+/baseline

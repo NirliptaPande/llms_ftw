@@ -13,6 +13,7 @@ from pathlib import Path
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import signal
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
@@ -102,6 +103,7 @@ def test_program(program_code: str, task: Dict, testing: str='test') -> Tuple[fl
                 results.append((expected, actual, score == 1.0))
             except TimeoutError:
                 signal.alarm(0)  # Cancel the alarm
+                print("Execution timed out", flush=True)
                 scores.append(0.0)
                 results.append((expected, None, False))
             except Exception as e:
@@ -287,7 +289,6 @@ def process_directory(
     
     time_phase1 = time.time()
     print(f"Phase 1 complete: {time_phase1 - time_start:.1f}s\n", flush=True)
-    
     # ========================================================================
     # PHASE 2A: Batch all prompts (K samples per task)
     # ========================================================================
@@ -662,19 +663,19 @@ def main():
     library = ProgramLibrary()
     
     results = process_directory(
-        data_dir='data_v2/evaluation',#TODO change data dir
+        data_dir='data_v1/eval_size_10',#TODO change data dir
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,
         library=library,
         timeout=2,
         max_find_similar_workers= 56,
-        log_dir="logs_new_dsl_fewshot_nosimilar",#TODO change log dir
+        log_dir="test_1",#TODO change log dir
         verbose=True,
-        similar=False
+        similar=True
     )
     
-    save_results(results, output_dir='results/new_dsl_fewshot_nosimilar')#TODO change result dir
+    save_results(results, output_dir='results/test_1')#TODO change result dir
 
 
 if __name__ == "__main__":

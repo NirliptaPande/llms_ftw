@@ -452,7 +452,7 @@ class ProgramLibrary:
         if similar:
             other_programs.sort(key=lambda x: x['similarity'], reverse=True)
         else:
-            other_programs = random.shuffle(other_programs)
+            random.shuffle(other_programs)
         
         print(f"\n=== Results ===", flush=True)
         print(f"Programs with perfect examples: {len(perfect_programs)}", flush=True)

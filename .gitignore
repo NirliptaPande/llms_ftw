@@ -12,3 +12,4 @@ library_cache.json
 src/results
 /logs*
 /prompts_testing
+/test_1

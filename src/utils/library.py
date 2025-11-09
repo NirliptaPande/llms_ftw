@@ -5,7 +5,7 @@ Uses execution-based similarity with parallelized evaluation.
 
 import re
 import json
-import os
+import random
 import inspect
 import threading
 import time
@@ -16,7 +16,7 @@ from typing import List, Dict, Set, Tuple, Any
 
 from utils.dsl import *
 from utils.constants import *
-from . import solvers
+# from . import solvers
 
 
 def pad_grid(grid,height, width, fill):
@@ -322,7 +322,8 @@ class ProgramLibrary:
                     min_similarity: float = 0.0,
                     n_workers: int = None,
                     timeout: int = 2,
-                    verbose: bool = False) -> List[Dict]:
+                    verbose: bool = False,
+                    similar: bool = True) -> List[Dict]:
         """
         Find programs based on execution similarity (parallelized).
         
@@ -448,7 +449,10 @@ class ProgramLibrary:
         
         # Sort both lists by similarity
         perfect_programs.sort(key=lambda x: x['similarity'], reverse=True)
-        other_programs.sort(key=lambda x: x['similarity'], reverse=True)
+        if similar:
+            other_programs.sort(key=lambda x: x['similarity'], reverse=True)
+        else:
+            other_programs = random.shuffle(other_programs)
         
         print(f"\n=== Results ===", flush=True)
         print(f"Programs with perfect examples: {len(perfect_programs)}", flush=True)

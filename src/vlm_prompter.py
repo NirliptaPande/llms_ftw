@@ -15,6 +15,7 @@ class VLMPrompter:
         self.phase2a_template = self._load_phase2a_template()
         self.phase2b_template = self._load_phase2b_template()
         self.phase2c_dsl_section = self._get_phase2c_dsl_section()
+        self.few_shot_examples = self._get_phase2c_fewshot_section()
     
     def build_phase2a_prompt(self, 
                              task: Dict[str, Any],
@@ -124,7 +125,8 @@ If it doesn't fit perfectly, identify what needs to be refined.
     def build_phase2c_prompt(self,
                              task: Dict[str, Any], 
                              validated_pattern: str,
-                             similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+                             similar_programs: List[Dict[str, Any]] = None,
+                             few_shot: bool = True ) -> List[Dict[str, Any]]:
         """
         Build Phase 2C prompt: Code Generation from Validated Pattern.
         This matches the original build_phase2_prompt structure exactly.
@@ -183,6 +185,16 @@ If it doesn't fit perfectly, identify what needs to be refined.
         content_blocks.append({
             "type": "text",
             "text": self.phase2c_dsl_section
+        })
+        if few_shot:
+            content_blocks.append({
+                "type": "text",
+                "text": self.few_shot_examples
+            })
+            
+        content_blocks.append({
+            "type": "text",
+            "text": "Generate the `solve(I)` function now.\n"
         })
         
         return content_blocks
@@ -641,5 +653,366 @@ def solve(I):
     return O # O is the output grid
 ```
 
-Generate the solve function now:
 """
+    def _get_phase2c_fewshot_section(self) -> str:
+        """Few-shot examples for Phase 2C (if needed)"""
+        return r"""
+    Here are some examples of ARC tasks and their corresponding `solve(I)` functions:
+    ---------------------------
+# Task 1:
+
+Below are 2 training examples follwed by the test example(s) you have to generalize to, for each example, the input grid is shown first, followed by the output grid. 
+
+Example 1:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0
+1|0|0|0|0|0|0|0|0|0|2
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+
+Output:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0
+1|1|1|1|1|5|2|2|2|2|2
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+
+Example 2:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+3|0|0|0|0|0|0|0|0|0|7
+0|0|0|0|0|0|0|0|0|0|0
+
+Output:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+3|3|3|3|3|5|7|7|7|7|7
+0|0|0|0|0|0|0|0|0|0|0
+
+
+============================================================
+TEST EXAMPLES (to solve)
+============================================================
+Below are 1 test example(s) you need to solve:
+For each test example, only the input grid is provided. You must determine the output.
+
+Test Example 1:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0
+4|0|0|0|0|0|0|0|0|0|8
+0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0
+6|0|0|0|0|0|0|0|0|0|9
+
+Output: [TO BE DETERMINED]
+
+Solution:
+```python
+def solve(I):
+    x1 = left_half(I)
+    x2 = right_half(I)
+    x3 = as_objects(x2, True, False, True)
+    x4 = as_objects(x1, True, False, True)
+    x5 = compose(horizontal_line, center)
+    x6 = combine_two_function_results(recolor, get_color, x5)
+    x7 = transform_and_flatten(x6, x4)
+    x8 = paint_onto_grid(x1, x7)
+    x9 = transform_and_flatten(x6, x3)
+    x10 = paint_onto_grid(I, x9)
+    x11 = as_objects(x8, True, False, True)
+    x12 = transform(upper_right_corner, x11)
+    x13 = shift_by_vector(x12, RIGHT)
+    x14 = flatten(x11)
+    x15 = paint_onto_grid(x10, x14)
+    O = fill(x15, COLOR_FIVE, x13)
+    return O
+```
+
+---------------------------
+# Task 2:
+
+Below are 3 training examples follwed by the test example(s) you have to generalize to, for each example, the input grid is shown first, followed by the output grid. 
+
+Example 1:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|0|1|0|0|1|1|0|1|0|0
+0|0|1|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|1|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|0|0|1|1|0|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Output:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|2|1|2|2|1|1|2|1|0|0
+0|0|1|0|0|0|0|0|0|0|2|0|0
+0|0|2|0|0|0|0|0|0|0|1|0|0
+0|0|2|0|0|0|0|0|0|0|2|0|0
+0|0|2|0|0|0|0|0|0|0|1|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|2|2|1|1|2|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Example 2:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|1|1|0|0|1|1|0|0|0|0
+0|0|1|0|0|0|0|0|1|0|0|0|0
+0|0|0|0|1|0|0|0|0|0|0|0|0
+0|0|1|0|1|0|0|0|1|0|0|0|0
+0|0|1|0|0|0|0|0|1|0|0|0|0
+0|0|0|0|1|0|0|0|1|0|0|0|0
+0|0|1|1|1|1|0|1|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Output:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|1|1|2|2|1|1|0|0|0|0
+0|0|1|0|2|0|0|0|1|0|0|0|0
+0|0|2|0|1|0|0|0|2|0|0|0|0
+0|0|1|0|1|0|0|0|1|0|0|0|0
+0|0|1|0|2|0|0|0|1|0|0|0|0
+0|0|2|0|1|0|0|0|1|0|0|0|0
+0|0|1|1|1|1|2|1|2|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Example 3:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|1|0|1|1|0|1|1|1|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|0|1|0|1|1|0|0|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|0|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|0|1|1|0|0|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Output:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|1|2|1|1|2|1|1|1|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|2|0|0|0|0|0|0|0|2|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|2|1|2|1|1|2|2|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|2|0|0|0|0|0|0|0|1|0|0
+0|0|1|1|2|1|1|2|2|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+
+============================================================
+TEST EXAMPLES (to solve)
+============================================================
+Below are 1 test example(s) you need to solve:
+For each test example, only the input grid is provided. You must determine the output.
+
+Test Example 1:
+Input:
+
+ASCII representation:
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|0|1|1|0|1|0|1|1|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|0|1|0|1|0|0|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|1|0|0|0|0|0|0|0|1|0|0
+0|0|1|0|1|1|0|1|0|1|1|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+0|0|0|0|0|0|0|0|0|0|0|0|0
+
+Output: [TO BE DETERMINED]
+
+Solution:
+```python
+def solve(I):
+    x1 = of_color(I, COLOR_ONE)
+    x2 = box(x1)
+    x3 = fill(I, COLOR_TWO, x2)
+    x4 = smallest_subgrid_containing(x1, x3)
+    x5 = of_color(x4, COLOR_ONE)
+    x6 = transform_and_flatten(vertical_line, x5)
+    x7 = transform_and_flatten(horizontal_line, x5)
+    x8 = size(x6)
+    x9 = size(x7)
+    x10 = greater_than(x8, x9)
+    x11 = condition_if_else(x10, x7, x6)
+    x12 = fill(x4, COLOR_TWO, x11)
+    x13 = of_color(x12, COLOR_TWO)
+    x14 = upper_left_corner(x1)
+    x15 = shift_by_vector(x13, x14)
+    O = fill_background(I, COLOR_TWO, x15)
+    return O
+```
+
+---------------------------
+# Task 3:
+
+Below are 2 training examples follwed by the test example(s) you have to generalize to:
+ for each example, the input grid is shown first, followed by the output grid. 
+.
+Example 1:
+Input:
+
+ASCII representation:
+8|0|0|0|0|0|8|8|8|8|8|8|0|8|8|8|0|8|8|0|8|8|8|0
+0|0|8|8|8|0|0|0|0|0|0|8|0|0|0|8|0|8|0|0|8|0|8|0
+8|8|8|0|8|0|8|8|8|8|0|8|8|8|0|8|0|8|8|8|8|0|8|0
+8|0|0|0|8|0|8|0|0|8|0|0|0|8|0|8|0|0|0|0|0|0|8|0
+8|0|8|8|8|0|8|8|0|8|0|8|8|8|0|8|8|0|8|8|8|8|8|0
+8|0|8|0|0|0|0|8|0|8|0|8|0|0|0|0|8|0|8|0|0|0|0|0
+8|0|8|8|8|8|8|8|0|8|0|8|8|8|8|8|8|3|8|8|8|8|8|0
+8|0|0|0|0|0|0|0|0|8|0|0|0|0|0|0|3|2|3|0|0|0|8|0
+8|8|0|8|8|8|0|8|8|8|0|8|8|8|8|8|8|3|8|8|8|0|8|0
+0|8|0|8|0|8|0|8|0|0|0|8|0|0|0|0|8|0|8|0|8|0|8|0
+0|8|8|8|0|8|8|8|0|8|8|8|0|8|8|0|8|8|8|0|8|8|8|0
+
+Output:
+
+ASCII representation:
+8|3|2|3|2|3|8|8|8|8|8|8|0|8|8|8|2|8|8|0|8|8|8|0
+3|2|8|8|8|2|3|2|3|2|3|8|0|0|0|8|3|8|0|0|8|2|8|0
+8|8|8|0|8|3|8|8|8|8|2|8|8|8|0|8|2|8|8|8|8|3|8|0
+8|0|0|0|8|2|8|0|0|8|3|2|3|8|0|8|3|2|3|2|3|2|8|0
+8|0|8|8|8|3|8|8|0|8|2|8|8|8|0|8|8|3|8|8|8|8|8|0
+8|0|8|2|3|2|3|8|0|8|3|8|0|0|0|0|8|2|8|0|0|0|0|0
+8|0|8|8|8|8|8|8|0|8|2|8|8|8|8|8|8|3|8|8|8|8|8|0
+8|0|0|0|0|0|0|0|0|8|3|2|3|2|3|2|3|2|3|2|3|2|8|0
+8|8|0|8|8|8|0|8|8|8|2|8|8|8|8|8|8|3|8|8|8|3|8|0
+0|8|0|8|0|8|0|8|3|2|3|8|0|0|0|0|8|2|8|0|8|2|8|0
+0|8|8|8|0|8|8|8|2|8|8|8|0|8|8|0|8|8|8|0|8|8|8|0
+
+Example 2:
+Input:
+
+ASCII representation:
+0|0|0|8|0|0|0|8|0|0|0|0|0|8
+8|8|0|8|8|8|0|8|0|8|8|8|0|8
+0|8|0|0|0|8|0|8|0|8|0|8|8|8
+0|8|8|8|8|8|0|8|0|8|0|0|0|0
+0|0|0|0|0|0|0|8|0|8|8|8|0|8
+8|8|8|8|8|8|0|8|0|0|0|8|0|8
+8|0|0|0|0|8|0|8|8|8|0|8|0|8
+8|8|8|8|0|8|0|0|0|8|0|8|0|0
+0|0|0|8|1|8|8|8|8|8|0|8|8|0
+8|8|0|8|4|1|0|0|0|0|0|0|8|0
+0|8|0|8|1|8|8|8|8|8|8|8|8|0
+0|8|8|8|0|8|0|0|0|0|0|0|0|0
+0|0|0|0|0|8|0|8|8|8|8|8|8|8
+
+Output:
+
+ASCII representation:
+0|0|0|8|0|0|0|8|1|4|1|4|1|8
+8|8|0|8|8|8|0|8|4|8|8|8|4|8
+0|8|0|0|0|8|0|8|1|8|0|8|8|8
+0|8|8|8|8|8|0|8|4|8|0|0|0|0
+0|0|0|0|0|0|0|8|1|8|8|8|0|8
+8|8|8|8|8|8|0|8|4|1|4|8|0|8
+8|4|1|4|1|8|0|8|8|8|1|8|0|8
+8|8|8|8|4|8|0|0|0|8|4|8|0|0
+0|0|0|8|1|8|8|8|8|8|1|8|8|0
+8|8|0|8|4|1|4|1|4|1|4|1|8|0
+1|8|0|8|1|8|8|8|8|8|8|8|8|0
+4|8|8|8|4|8|0|0|0|0|0|0|0|0
+1|4|1|4|1|8|0|8|8|8|8|8|8|8
+
+
+============================================================
+TEST EXAMPLES (to solve)
+============================================================
+Below are 1 test example(s) you need to solve:
+For each test example, only the input grid is provided. You must determine the output.
+
+Test Example 1:
+Input:
+
+ASCII representation:
+8|8|0|8|0|0|8|0|0|0|0|0|0|0|0
+0|8|0|8|8|8|8|4|8|8|8|8|8|8|8
+0|8|0|0|0|0|4|3|8|0|0|0|0|0|8
+0|8|8|8|8|8|8|4|8|8|8|0|8|8|8
+0|0|0|0|0|0|8|0|0|0|8|0|8|0|0
+8|8|8|8|8|0|8|8|8|0|8|0|8|0|8
+0|0|0|0|8|0|0|0|8|0|8|0|8|0|8
+8|8|8|0|8|8|8|0|8|0|8|0|8|8|8
+0|0|8|0|0|0|8|0|8|0|8|0|0|0|0
+8|0|8|8|8|0|8|8|8|0|8|8|8|0|8
+8|0|0|0|8|0|0|0|0|0|0|0|8|0|8
+8|8|8|0|8|0|8|8|8|8|8|8|8|0|8
+0|0|8|0|8|0|8|0|0|0|0|0|0|0|8
+8|0|8|8|8|0|8|0|8|8|8|8|8|8|8
+8|0|0|0|0|0|8|0|8|0|0|0|0|0|0
+
+Output: [TO BE DETERMINED]
+
+Solution:
+```python
+def solve_b782dc8a(I):
+    x1 = least_common_color(I)
+    x2 = as_objects(I, True, False, False)
+    x3 = of_color(I, x1)
+    x4 = get_first(x3)
+    x5 = direct_neighbors(x4)
+    x6 = to_object(x5, I)
+    x7 = most_common_color(x6)
+    x8 = of_color(I, x7)
+    x9 = color_filter(x2, COLOR_ZERO)
+    x10 = fix_last_argument(adjacent, x8)
+    x11 = keep_if_condition_and_flatten(x9, x10)
+    x12 = to_indices(x11)
+    x13 = fix_last_argument(manhattan_distance, x3)
+    x14 = chain(is_even, x13, initset)
+    x15 = keep_if_condition(x12, x14)
+    x16 = difference(x12, x15)
+    x17 = fill(I, x1, x15)
+    O = fill(x17, x7, x16)
+    return O
+```
+
+---------------------------
+    """

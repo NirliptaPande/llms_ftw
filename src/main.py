@@ -24,23 +24,6 @@ from utils.dsl import *
 from utils.constants import *
 
 
-class ThreadSafeVLMClient:
-    """VLM client wrapper for parallel API calls"""
-    def __init__(self, client):
-        self.client = client
-    
-    def query(self, prompt, system_prompt=None):
-        try:
-            return self.client.query(prompt, system_prompt)
-        except TimeoutError as e:
-            return ""
-        except Exception as e:
-            return ""
-    
-    def __getattr__(self, name):
-        return getattr(self.client, name)
-
-
 @dataclass
 class TaskResult:
     """Result of attempting to solve a task"""
@@ -721,20 +704,20 @@ def main():
         max_tokens=vlm_phase1_config['max_tokens'],
         max_retries=vlm_phase1_config['max_retries'],
         save_prompts=vlm_phase1_config['save_prompts'],
-        prompt_log_dir=vlm_phase1_config['prompt_log_dir']
+        prompt_log_dir=vlm_phase1_config['prompt_log_dir'],
+        suppress_errors=True  # Return empty string on errors for parallel API calls
     )
     vlm_config_phase2 = VLMConfig(
         api_key=api_key,
         model=model,
         max_retries=vlm_phase2_config['max_retries'],
         api_base=api_base,
-        max_tokens=vlm_phase2_config['max_tokens']
+        max_tokens=vlm_phase2_config['max_tokens'],
+        suppress_errors=True  # Return empty string on errors for parallel API calls
     )
-    
-    base_client_phase1 = create_client(PROVIDER, config=vlm_config_phase1)
-    base_client_phase2 = create_client(PROVIDER, config=vlm_config_phase2)
-    vlm_client_phase1 = ThreadSafeVLMClient(base_client_phase1)
-    vlm_client_phase2 = ThreadSafeVLMClient(base_client_phase2)
+
+    vlm_client_phase1 = create_client(PROVIDER, config=vlm_config_phase1)
+    vlm_client_phase2 = create_client(PROVIDER, config=vlm_config_phase2)
     prompter = VLMPrompter()
     library = ProgramLibrary()
 

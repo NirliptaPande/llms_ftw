@@ -28,6 +28,7 @@ class VLMConfig:
     retry_delay: float = 60.0
     save_prompts: bool = False
     prompt_log_dir: str = "prompts"
+    suppress_errors: bool = False  # Return empty string on errors instead of raising
 
 class BaseVLMClient(ABC):
     """Base class for VLM clients"""
@@ -106,59 +107,65 @@ class BaseVLMClient(ABC):
         
         print(f"📝 Saved prompt to: {filepath}")
         
-    def query(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str] = None) -> str:#TODO: Change system prompt to union of str and content blocks
+    def query(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str] = None) -> str:
         """
         Query the VLM API with a prompt
-        
+
         Args:
             prompt: User prompt
             system_prompt: Optional system prompt for context
-            
+
         Returns:
-            Response text from the model
+            Response text from the model (or empty string if suppress_errors=True and error occurs)
         """
-        payload = self._build_payload(prompt, system_prompt)
-        # self._save_prompt_html(payload, prompt_type=f"{self.config.model}")
-        
-        for attempt in range(self.config.max_retries):
-            try:
-                response = self.session.post(
-                    f'{self.config.api_base}/chat/completions',
-                    json=payload,
-                    timeout=self.config.timeout
-                )
-                
-                response.raise_for_status()
-                data = response.json()
-                return self._extract_response(data)
-                
-            except requests.exceptions.Timeout:
-                print(f"Timeout on attempt {attempt + 1}/{self.config.max_retries}")
-                if attempt < self.config.max_retries - 1:
-                    time.sleep(self.config.retry_delay * (attempt + 1))
-                    continue
-                raise
-            
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 429:
-                    print(f"Rate limited, waiting before retry {attempt + 1}/{self.config.max_retries}")
-                    time.sleep(self.config.retry_delay * (attempt + 1) * 2)
-                    continue
-                elif e.response.status_code >= 500:
-                    print(f"Server error on attempt {attempt + 1}/{self.config.max_retries}")
+        try:
+            payload = self._build_payload(prompt, system_prompt)
+            # self._save_prompt_html(payload, prompt_type=f"{self.config.model}")
+
+            for attempt in range(self.config.max_retries):
+                try:
+                    response = self.session.post(
+                        f'{self.config.api_base}/chat/completions',
+                        json=payload,
+                        timeout=self.config.timeout
+                    )
+
+                    response.raise_for_status()
+                    data = response.json()
+                    return self._extract_response(data)
+
+                except requests.exceptions.Timeout:
+                    print(f"Timeout on attempt {attempt + 1}/{self.config.max_retries}")
                     if attempt < self.config.max_retries - 1:
                         time.sleep(self.config.retry_delay * (attempt + 1))
                         continue
-                raise
-            
-            except Exception as e:
-                print(f"Error on attempt {attempt + 1}/{self.config.max_retries}: {e}")
-                if attempt < self.config.max_retries - 1:
-                    time.sleep(self.config.retry_delay)
-                    continue
-                raise
-        
-        raise Exception(f"Failed after {self.config.max_retries} retries")
+                    raise
+
+                except requests.exceptions.HTTPError as e:
+                    if e.response.status_code == 429:
+                        print(f"Rate limited, waiting before retry {attempt + 1}/{self.config.max_retries}")
+                        time.sleep(self.config.retry_delay * (attempt + 1) * 2)
+                        continue
+                    elif e.response.status_code >= 500:
+                        print(f"Server error on attempt {attempt + 1}/{self.config.max_retries}")
+                        if attempt < self.config.max_retries - 1:
+                            time.sleep(self.config.retry_delay * (attempt + 1))
+                            continue
+                    raise
+
+                except Exception as e:
+                    print(f"Error on attempt {attempt + 1}/{self.config.max_retries}: {e}")
+                    if attempt < self.config.max_retries - 1:
+                        time.sleep(self.config.retry_delay)
+                        continue
+                    raise
+
+            raise Exception(f"Failed after {self.config.max_retries} retries")
+
+        except Exception as e:
+            if self.config.suppress_errors:
+                return ""
+            raise
 
 
 class OpenAICompatibleClient(BaseVLMClient):
@@ -245,31 +252,37 @@ class GeminiClient(BaseVLMClient):
     
     def query(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """Override to use Gemini's specific endpoint"""
-        payload = self._build_payload(prompt, system_prompt)
-        
-        # Gemini uses different endpoint structure
-        endpoint = f'{self.config.api_base}/models/{self.config.model}:generateContent?key={self.config.api_key}'
-        
-        for attempt in range(self.config.max_retries):
-            try:
-                response = self.session.post(
-                    endpoint,
-                    json=payload,
-                    timeout=self.config.timeout
-                )
-                
-                response.raise_for_status()
-                data = response.json()
-                return self._extract_response(data)
-                
-            except Exception as e:
-                print(f"Error on attempt {attempt + 1}/{self.config.max_retries}: {e}")
-                if attempt < self.config.max_retries - 1:
-                    time.sleep(self.config.retry_delay)
-                    continue
-                raise
-        
-        raise Exception(f"Failed after {self.config.max_retries} retries")
+        try:
+            payload = self._build_payload(prompt, system_prompt)
+
+            # Gemini uses different endpoint structure
+            endpoint = f'{self.config.api_base}/models/{self.config.model}:generateContent?key={self.config.api_key}'
+
+            for attempt in range(self.config.max_retries):
+                try:
+                    response = self.session.post(
+                        endpoint,
+                        json=payload,
+                        timeout=self.config.timeout
+                    )
+
+                    response.raise_for_status()
+                    data = response.json()
+                    return self._extract_response(data)
+
+                except Exception as e:
+                    print(f"Error on attempt {attempt + 1}/{self.config.max_retries}: {e}")
+                    if attempt < self.config.max_retries - 1:
+                        time.sleep(self.config.retry_delay)
+                        continue
+                    raise
+
+            raise Exception(f"Failed after {self.config.max_retries} retries")
+
+        except Exception as e:
+            if self.config.suppress_errors:
+                return ""
+            raise
 
 
 def create_client(provider: str = "grok", config: Optional[VLMConfig] = None) -> BaseVLMClient:

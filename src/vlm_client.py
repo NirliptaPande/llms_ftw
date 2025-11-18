@@ -1,5 +1,9 @@
 """
-Multi-Provider VLM Client for Grok, Qwen (vLLM), and Gemini APIs
+Multi-Provider VLM Client for OpenAI-compatible APIs and Gemini
+
+Supports:
+- OpenAI-compatible providers (Grok, Qwen, OpenAI, Claude, etc.) via OpenAICompatibleClient
+- Google Gemini via GeminiClient (different API structure)
 """
 
 import os
@@ -157,55 +161,29 @@ class BaseVLMClient(ABC):
         raise Exception(f"Failed after {self.config.max_retries} retries")
 
 
-class GrokClient(BaseVLMClient):
-    """Client for Grok API"""
-    
+class OpenAICompatibleClient(BaseVLMClient):
+    """Client for OpenAI-compatible APIs (Grok, Qwen, Claude, GPT, etc.)"""
+
     def _setup_session(self):
-        self.session.headers.update({
-            'Authorization': f'Bearer {self.config.api_key}',
-            'Content-Type': 'application/json'
-        })
-    
-    def _build_payload(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str]) -> dict:#TODO: Change system prompt to union of str and content blocks
+        headers = {'Content-Type': 'application/json'}
+        # Add API key if provided (not needed for local servers like Qwen)
+        if self.config.api_key:
+            headers['Authorization'] = f'Bearer {self.config.api_key}'
+        self.session.headers.update(headers)
+
+    def _build_payload(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str]) -> dict:
         messages = []
         if system_prompt:
             messages.append({'role': 'system', 'content': system_prompt})
         messages.append({'role': 'user', 'content': prompt})
-        
+
         return {
             'model': self.config.model,
             'messages': messages,
             'max_tokens': self.config.max_tokens,
             'temperature': self.config.temperature
         }
-    
-    def _extract_response(self, data: dict) -> str:
-        if 'choices' in data and len(data['choices']) > 0:
-            return data['choices'][0]['message']['content']
-        raise ValueError(f"Unexpected response format: {data}")
 
-
-class QwenClient(BaseVLMClient):
-    """Client for Qwen via vLLM (local)"""
-    
-    def _setup_session(self):
-        self.session.headers.update({
-            'Content-Type': 'application/json'
-        })
-    
-    def _build_payload(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str]) -> dict:#TODO: Change system prompt to union of str and content blocks
-        messages = []
-        if system_prompt:
-            messages.append({'role': 'system', 'content': system_prompt})
-        messages.append({'role': 'user', 'content': prompt})
-        
-        return {
-            'model': self.config.model,
-            'messages': messages,
-            'max_tokens': self.config.max_tokens,
-            'temperature': self.config.temperature
-        }
-    
     def _extract_response(self, data: dict) -> str:
         if 'choices' in data and len(data['choices']) > 0:
             return data['choices'][0]['message']['content']
@@ -297,38 +275,38 @@ class GeminiClient(BaseVLMClient):
 def create_client(provider: str = "grok", config: Optional[VLMConfig] = None) -> BaseVLMClient:
     """
     Factory function to create appropriate VLM client
-    
+
     Args:
-        provider: One of "grok", "qwen", or "gemini"
+        provider: One of "grok", "qwen", "gemini", or any OpenAI-compatible provider
         config: Optional custom config (if None, uses defaults from env)
-        
+
     Returns:
         Configured VLM client
     """
     load_dotenv()
     provider = provider.lower()
-    
-    if provider == "grok":
+
+    # OpenAI-compatible providers (Grok, Qwen, etc.)
+    if provider in ["grok", "qwen", "openai", "claude"]:
         if config is None:
-            api_key = os.getenv('GROK_API_KEY')
-            if not api_key:
-                raise ValueError("GROK_API_KEY not set")
-            config = VLMConfig(
-                api_key=api_key,
-                model="grok-4-fast",
-                api_base="https://api.x.ai/v1"
-            )
-        return GrokClient(config)
-    
-    elif provider == "qwen":
-        if config is None:
-            config = VLMConfig(
-                api_key=None,  # No API key needed for local
-                model="Qwen/Qwen2.5-7B-Instruct",
-                api_base="http://localhost:8000/v1"
-            )
-        return QwenClient(config)
-    
+            if provider == "grok":
+                api_key = os.getenv('GROK_API_KEY')
+                if not api_key:
+                    raise ValueError("GROK_API_KEY not set")
+                config = VLMConfig(
+                    api_key=api_key,
+                    model="grok-4-fast",
+                    api_base="https://api.x.ai/v1"
+                )
+            elif provider == "qwen":
+                config = VLMConfig(
+                    api_key=None,  # No API key needed for local
+                    model="Qwen/Qwen2.5-7B-Instruct",
+                    api_base="http://localhost:8000/v1"
+                )
+        return OpenAICompatibleClient(config)
+
+    # Gemini has different API structure
     elif provider == "gemini":
         if config is None:
             api_key = os.getenv('GEMINI_API_KEY')
@@ -340,9 +318,9 @@ def create_client(provider: str = "grok", config: Optional[VLMConfig] = None) ->
                 api_base="https://generativelanguage.googleapis.com/v1beta"
             )
         return GeminiClient(config)
-    
+
     else:
-        raise ValueError(f"Unknown provider: {provider}. Choose 'grok', 'qwen', or 'gemini'")
+        raise ValueError(f"Unknown provider: {provider}. Choose 'grok', 'qwen', 'gemini', or other OpenAI-compatible provider")
 
 
 # Example usage

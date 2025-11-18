@@ -13,6 +13,7 @@ from pathlib import Path
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import yaml
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
@@ -671,39 +672,63 @@ def save_results(results: List[TaskResult], output_dir: str = 'results') -> None
     print(f"Saved summary to {csv_file}", flush=True)
 
 
+def load_config(config_path: str = None) -> dict:
+    """Load configuration from YAML file."""
+    if config_path is None:
+        # Default to config/config.yaml relative to the project root
+        project_root = Path(__file__).resolve().parent.parent
+        config_path = project_root / 'config' / 'config.yaml'
+
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    return config
+
+
 def main():
     from dotenv import load_dotenv
     load_dotenv()
-    PROVIDER = "grok"
-    
+
+    # Load configuration from YAML
+    config = load_config()
+
+    PROVIDER = config['provider']
+
+    # Get model configuration from config file
+    model = config['model']['name']
+    api_base = config['model']['api_base']
+
+    # Get API key from environment based on provider
     if PROVIDER == "grok":
         api_key = os.getenv('GROK_API_KEY')
-        api_base = "https://api.x.ai/v1"
-        model = "grok-4-fast"
     elif PROVIDER == "qwen":
         api_key = None
-        api_base = "http://localhost:8000/v1"
-        model = "Qwen/Qwen2.5-7B-Instruct"
     elif PROVIDER == "gemini":
         api_key = os.getenv('GEMINI_API_KEY')
-        api_base = "https://generativelanguage.googleapis.com/v1beta/models/"
-        model = "gemini-2.5-pro"
         
+    # Get VLM configuration from config file
+    vlm_phase1_config = config['vlm_config']['phase1']
+    vlm_phase2_config = config['vlm_config']['phase2']
+
     vlm_config_phase1 = VLMConfig(
         api_key=api_key,
         model=model,
         api_base=api_base,
-        max_tokens=16384,
-        max_retries=3,
-        save_prompts=False,
-        prompt_log_dir="prompts_old_dsl"#TODO change prompt log dir
+        max_tokens=vlm_phase1_config['max_tokens'],
+        max_retries=vlm_phase1_config['max_retries'],
+        save_prompts=vlm_phase1_config['save_prompts'],
+        prompt_log_dir=vlm_phase1_config['prompt_log_dir']
     )
     vlm_config_phase2 = VLMConfig(
         api_key=api_key,
         model=model,
-        max_retries=3,
+        max_retries=vlm_phase2_config['max_retries'],
         api_base=api_base,
-        max_tokens=8192
+        max_tokens=vlm_phase2_config['max_tokens']
     )
     
     base_client_phase1 = create_client(PROVIDER, config=vlm_config_phase1)
@@ -712,23 +737,28 @@ def main():
     vlm_client_phase2 = ThreadSafeVLMClient(base_client_phase2)
     prompter = VLMPrompter()
     library = ProgramLibrary()
-    
+
+    # Get process_directory parameters from config file
+    process_params = config['process_directory']
+
     results = process_directory(
-        data_dir='data_v2/evaluation',#TODO change data dir
+        data_dir=process_params['data_dir'],
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,
         library=library,
-        timeout=2,
-        k_samples=4,
-        max_find_similar_workers= 56,
-        log_dir="logs_baseline",#TODO change log dir
-        verbose=False,
-        similar=True,
-        few_shot=True
+        timeout=process_params['timeout'],
+        k_samples=process_params['k_samples'],
+        max_find_similar_workers=process_params['max_find_similar_workers'],
+        log_dir=process_params['log_dir'],
+        verbose=process_params['verbose'],
+        similar=process_params['similar'],
+        few_shot=process_params['few_shot']
     )
-    
-    save_results(results, output_dir='results/baseline')#TODO change result dir
+
+    # Get output directory from config file
+    output_dir = config['output']['results_dir']
+    save_results(results, output_dir=output_dir)
 
 
 if __name__ == "__main__":

@@ -1,108 +1,148 @@
-# ARC Solver - Two-Phase LLM System
+# ARC Solver - Multi-Provider LLM System with K-Sample Diversity
 
-## I have no idea if this up-to-date
-
-Complete pipeline for solving ARC (Abstraction and Reasoning Corpus) tasks using a two-phase LLM approach with DSL-based code generation.
+A complete pipeline for solving ARC (Abstraction and Reasoning Corpus) tasks using a multi-phase LLM approach with DSL-based code generation and diversity sampling.
 
 ## 🏗️ System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         PHASE 1                                 │
-│                    Pattern Discovery                            │
-│  ┌──────────┐    ┌──────────┐    ┌──────────────────────┐     │
-│  │   Task   │───▶│   VLM    │───▶│  Pattern Analysis    │     │
-│  │ Examples │    │ (Sonnet) │    │  (DSL operations)    │     │
-│  └──────────┘    └──────────┘    └──────────────────────┘     │
-│                                             │                   │
-└─────────────────────────────────────────────┼───────────────────┘
-                                              │
-                    ┌─────────────────────────┼───────────────┐
-                    │  LIBRARY SEARCH         ▼               │
-                    │  ┌──────────────────────────────────┐   │
-                    │  │  Extract keywords from pattern   │   │
-                    │  │  Search solvers.py for similar   │   │
-                    │  │  Test library programs           │   │
-                    │  └──────────────────────────────────┘   │
-                    │             │          │                 │
-                    │     Perfect Match?  Top-K Similar       │
-                    │             │          │                 │
-                    │            YES        NO                 │
-                    │             │          │                 │
-                    │           DONE         ▼                 │
-                    └────────────────────────┼─────────────────┘
-                                             │
-┌────────────────────────────────────────────┼──────────────────┐
-│                         PHASE 2            ▼                   │
-│                    Code Generation                             │
-│  ┌──────────────┐    ┌──────────┐    ┌────────────────────┐  │
-│  │ Pattern +    │───▶│   VLM    │───▶│  Python Code       │  │
-│  │ Similar Progs│    │ (Haiku)  │    │  def solve(I): ... │  │
-│  └──────────────┘    └──────────┘    └────────────────────┘  │
-│                                             │                  │
-└─────────────────────────────────────────────┼──────────────────┘
-                                              │
-                    ┌─────────────────────────┼───────────┐
-                    │  TEST & EVALUATE        ▼           │
-                    │  ┌──────────────────────────────┐   │
-                    │  │  Execute on training examples│   │
-                    │  │  Calculate hamming distance  │   │
-                    │  │  Compare with library        │   │
-                    │  │  Select best solution        │   │
-                    │  └──────────────────────────────┘   │
-                    │             │                        │
-                    │      Perfect Score?                  │
-                    │             │                        │
-                    │            YES                       │
-                    │             │                        │
-                    │  ┌──────────▼──────────┐            │
-                    │  │  Add to Library     │            │
-                    │  └─────────────────────┘            │
-                    └──────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         CONFIGURATION                                   │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  config/config.yaml                                              │  │
+│  │  • Provider selection (Grok/Qwen/Gemini)                         │  │
+│  │  • Model parameters (max_tokens, retries, etc.)                  │  │
+│  │  • Pipeline settings (k_samples, timeout, etc.)                  │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         PHASE 1: Find Similar                           │
+│                  Execution-Based Similarity Search                      │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  • Search library for programs with similar execution patterns   │  │
+│  │  • Test programs on training examples                            │  │
+│  │  • Calculate grid similarity scores                              │  │
+│  │  • Return top-K similar programs (similarity > 0.1)              │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                    │                                    │
+│                            Perfect Match (1.0)?                         │
+│                         ┌──────────┴──────────┐                         │
+│                        YES                    NO                        │
+│                         │                      │                        │
+│                       DONE                     ▼                        │
+└────────────────────────────────────────────────┼─────────────────────────┘
+                                                 │
+┌────────────────────────────────────────────────┼─────────────────────────┐
+│                    PHASE 2A: Hypothesis Formation                       │
+│               Generate K diverse hypotheses per task                    │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  For each task, generate K samples (e.g., K=4):                  │  │
+│  │  • Analyze training examples sequentially                        │  │
+│  │  • Discover transformation patterns                              │  │
+│  │  • Output pattern summary in natural language                    │  │
+│  │  • Diversity through temperature sampling                        │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                    │                                    │
+│                          Batch all prompts → Parallel API calls         │
+└────────────────────────────────────────────────┼─────────────────────────┘
+                                                 │
+┌────────────────────────────────────────────────┼─────────────────────────┐
+│                    PHASE 2B: Hypothesis Validation                      │
+│                  Validate & refine hypotheses                           │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  For each hypothesis from 2A:                                    │  │
+│  │  • Check if pattern extends to test input                        │  │
+│  │  • Refine hypothesis if needed                                   │  │
+│  │  • Output validated pattern description                          │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                    │                                    │
+│                          Batch all prompts → Parallel API calls         │
+└────────────────────────────────────────────────┼─────────────────────────┘
+                                                 │
+┌────────────────────────────────────────────────┼─────────────────────────┐
+│                    PHASE 2C: Code Generation                            │
+│              Generate executable code from patterns                     │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  For each validated pattern:                                     │  │
+│  │  • Generate Python code using DSL primitives                     │  │
+│  │  • Include similar programs as reference                         │  │
+│  │  • Output: def solve(I): ...                                     │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                    │                                    │
+│                          Batch all prompts → Parallel API calls         │
+└────────────────────────────────────────────────┼─────────────────────────┘
+                                                 │
+┌────────────────────────────────────────────────┼─────────────────────────┐
+│                    BEST-OF-K SELECTION                                  │
+│              Test all K programs, select best                           │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  1. Test all K programs on TRAINING set                          │  │
+│  │  2. Select top 2 candidates                                      │  │
+│  │  3. Test both on TEST set                                        │  │
+│  │  4. Select best performer on test set                            │  │
+│  │  5. Compare with library fallback                                │  │
+│  │  6. Return final solution (score = 1.0 → add to library)         │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 📦 Components
+## 📦 Project Structure
 
-### Core Files
+```
+llms_ftw/
+├── config/
+│   └── config.yaml              # Main configuration file
+├── src/
+│   ├── main.py                  # Main pipeline orchestration
+│   ├── vlm_client.py            # Multi-provider VLM client
+│   ├── vlm_prompter.py          # Prompt builders for each phase
+│   └── utils/
+│       ├── library.py           # Program library & similarity search
+│       ├── dsl.py               # Domain-Specific Language (100+ primitives)
+│       └── constants.py         # DSL constants (colors, directions)
+├── run_main.slurm              # Basic SLURM submission script
+├── run_with_config.slurm       # Advanced SLURM with config selection
+├── RUN_INSTRUCTIONS.md         # Detailed execution guide
+└── readme.md                   # This file
+```
 
-1. **`main.py`** - Main orchestration pipeline
-   - Coordinates Phase 1 and Phase 2
-   - Tests programs against training examples
-   - Manages library search and fallback logic
+## 🎯 Key Features
 
-2. **`vlm_prompter.py`** - Prompt builder
-   - `build_phase1_prompt()` - Pattern discovery prompt
-   - `build_phase2_prompt()` - Code generation prompt
-   - Includes full DSL reference (~1,500-2,500 tokens)
+### 1. **YAML-Based Configuration**
+All hyperparameters in one place - no more hardcoded values!
+- Provider selection (Grok, Qwen, Gemini)
+- Model settings (tokens, retries, temperature)
+- Pipeline parameters (k_samples, timeout, workers)
+- Input/output directories
 
-3. **`vlm_client.py`** - API client
-   - Handles Grok API calls
-   - Retry logic with exponential backoff
-   - Rate limiting support
+### 2. **Multi-Provider Support**
+Unified interface for multiple LLM providers:
+- **Grok** (X.AI's API)
+- **Qwen** (local vLLM server)
+- **Gemini** (Google's API)
+- Easy to add more OpenAI-compatible providers
 
-4. **`library.py`** - Program storage
-   - `ProgramLibrary` class for storing solutions
-   - Keyword-based similarity search
-   - Jaccard similarity scoring
+### 3. **K-Sample Diversity**
+Generate K diverse solutions per task, select the best:
+- Reduces risk of single bad hypothesis
+- Temperature-based diversity
+- Best-of-K selection on test set
+- Configurable K value (default: 4)
 
-5. **`dsl.py`** - Domain-Specific Language
-   - 100+ primitives for grid transformations
-   - Functional programming support
-   - Object manipulation functions
+### 4. **Simplified Architecture**
+Clean, maintainable codebase:
+- `OpenAICompatibleClient` for Grok/Qwen/etc.
+- `GeminiClient` for Gemini's different API
+- Built-in error suppression (no wrapper classes)
+- Direct configuration → client flow
 
-6. **`constants.py`** - DSL constants
-   - Colors (ZERO-NINE)
-   - Directions (UP, DOWN, LEFT, RIGHT)
-   - Special values (T, F, ORIGIN)
-
-7. **`task_loader.py`** - Task I/O utilities
-   - Load tasks from JSON files
-   - Convert between list/tuple formats
-   - Batch loading from directories
-
-8. **`solvers.py`** - Pre-solved tasks (your file)
-   - Collection of `solve_*` functions
-   - Automatically loaded into library
+### 5. **SLURM Support**
+Ready for cluster execution:
+- Pre-configured SLURM scripts
+- Multiple config file support
+- Job monitoring and logging
+- Easy customization for your cluster
 
 ## 🚀 Quick Start
 
@@ -110,267 +150,148 @@ Complete pipeline for solving ARC (Abstraction and Reasoning Corpus) tasks using
 
 ```bash
 # Install dependencies
-pip install requests
+pip install pyyaml requests python-dotenv
 
-# Set API key
-export GROK_API_KEY=your_grok_api_key_here
+# Set API keys in .env file
+echo "GROK_API_KEY=your_key_here" > .env
+# echo "GEMINI_API_KEY=your_key_here" >> .env  # if using Gemini
 ```
 
-### 2. Prepare Your Files
+### 2. Configure Settings
 
-Ensure you have:
-```
-your_project/
-├── main.py
-├── vlm_prompter.py
-├── vlm_client.py
-├── library.py
-├── dsl.py
-├── constants.py
-├── task_loader.py
-├── solvers.py          # Your existing solutions
-└── tasks/              # Directory with ARC JSON files
-    ├── task1.json
-    ├── task2.json
-    └── ...
+Edit `config/config.yaml`:
+
+```yaml
+# Choose provider
+provider: "grok"  # or "qwen", "gemini"
+
+# Model configuration
+model:
+  name: "grok-4-fast"
+  api_base: "https://api.x.ai/v1"
+
+# Pipeline settings
+process_directory:
+  data_dir: "data_v2/evaluation"
+  k_samples: 4              # Number of diverse samples per task
+  timeout: 2                # Execution timeout (seconds)
+  max_find_similar_workers: 56
+  log_dir: "logs_baseline"
+  verbose: false
+  similar: true
+  few_shot: true
+
+# Output
+output:
+  results_dir: "results/baseline"
 ```
 
 ### 3. Run the Solver
 
-#### Option A: Single Task (Programmatic)
+#### Local/Interactive:
+```bash
+python src/main.py
+```
+
+#### SLURM Cluster:
+```bash
+# Basic submission
+sbatch run_main.slurm
+
+# With specific config
+sbatch run_with_config.slurm baseline
+```
+
+See `RUN_INSTRUCTIONS.md` for detailed execution guide.
+
+## 🔧 Core Components
+
+### VLM Client (`vlm_client.py`)
+
+**Unified multi-provider client with two classes:**
 
 ```python
-from main import solve_task
-from vlm_client import VLMClient
-from vlm_prompter import VLMPrompter
-from library import ProgramLibrary
-import dsl
+# OpenAI-compatible providers (Grok, Qwen, Claude, GPT, etc.)
+class OpenAICompatibleClient(BaseVLMClient):
+    - Handles standard chat/completions endpoint
+    - Conditional API key (supports local servers)
+    - Automatic retry with exponential backoff
+    - Built-in error suppression
 
-# Load DSL
-with open('dsl.py', 'r') as f:
-    dsl_globals = {}
-    exec(f.read(), dsl_globals)
-
-# Initialize
-client = VLMClient()
-prompter = VLMPrompter()
-library = ProgramLibrary()
-
-# Your task
-task = {
-    'train': [
-        {
-            'input': ((1, 2), (3, 4)),
-            'output': ((2, 1), (4, 3))
-        }
-    ]
-}
-
-# Solve
-result = solve_task(
-    task=task,
-    task_id='my_task',
-    vlm_client=client,
-    prompter=prompter,
-    library=library,
-    dsl_globals=dsl_globals,
-    verbose=True
-)
-
-print(f"Success: {result.success}")
-print(f"Score: {result.score:.2f}")
-print(f"Program:\n{result.program}")
+# Google Gemini (different API structure)
+class GeminiClient(BaseVLMClient):
+    - Custom endpoint format
+    - Different payload structure
+    - Same retry/error handling
 ```
 
-#### Option B: Batch Processing
-
+**Configuration:**
 ```python
-from task_loader import load_tasks_from_directory
-from main import solve_task, load_solvers
-# ... (same initialization as above)
-
-# Load existing solutions
-load_solvers('solvers.py', library, dsl_globals)
-
-# Load all tasks
-tasks = load_tasks_from_directory('tasks/')
-
-# Solve each task
-results = {}
-for task_id, task in tasks.items():
-    result = solve_task(
-        task=task,
-        task_id=task_id,
-        vlm_client=client,
-        prompter=prompter,
-        library=library,
-        dsl_globals=dsl_globals,
-        verbose=True
-    )
-    results[task_id] = result
-
-# Summary
-solved = sum(1 for r in results.values() if r.success)
-print(f"\n✅ Solved {solved}/{len(results)} tasks")
-```
-
-## 📊 How It Works
-
-### Phase 1: Pattern Discovery (~1,561 tokens)
-
-**Input:** Training examples (input/output pairs)
-
-**Process:**
-1. LLM analyzes each example sequentially
-2. Identifies transformations in DSL terms
-3. Synthesizes final pattern with operations
-
-**Output:** Structured pattern analysis
-```
-<final_pattern>
-SIZE: (h,w) → (2h,w)
-OPS:
-x1 = hmirror(I)
-O = vconcat(I, x1)
-LOGIC: stack horizontally mirrored version below original
-CONDITIONS: none
-</final_pattern>
-```
-
-### Library Search
-
-**Process:**
-1. Extract DSL function keywords from Phase 1 output
-2. Search `solvers.py` using Jaccard similarity
-3. Test top-K similar programs on training examples
-4. If perfect match found (score=1.0), return immediately
-
-### Phase 2: Code Generation (~2,497 tokens)
-
-**Input:**
-- Phase 1 pattern analysis
-- Top-5 similar programs from library
-
-**Process:**
-1. LLM generates Python code using DSL primitives
-2. Includes functional programming patterns
-3. Follows solve(I) function signature
-
-**Output:** Python code
-```python
-def solve(I):
-    # Mirror horizontally
-    x1 = hmirror(I)
-    
-    # Stack vertically
-    O = vconcat(I, x1)
-    
-    return O
-```
-
-### Testing & Evaluation
-
-**Process:**
-1. Execute generated code on training examples
-2. Calculate hamming distance (per-cell comparison)
-3. Compute similarity score (1.0 = perfect match)
-4. Compare with best library program
-5. Select highest-scoring solution
-
-**Scoring:**
-- `1.0` = Perfect match (all cells identical)
-- `0.8` = 80% of cells match
-- `0.0` = Completely different
-
-### Library Update
-
-If score = 1.0:
-- Add solution to library
-- Available for future similarity searches
-
-## 🔧 Configuration
-
-### VLM Settings
-
-```python
-from vlm_client import VLMConfig
-
 config = VLMConfig(
     api_key="your_key",
-    model="grok-beta",  # or "claude-sonnet-3.5"
-    max_tokens=4096,
-    temperature=0.7,  # 0.0 for Phase 1, 0.7 for Phase 2
-    max_retries=3
+    model="grok-4-fast",
+    api_base="https://api.x.ai/v1",
+    max_tokens=16384,
+    max_retries=3,
+    suppress_errors=True  # Return empty string on errors
 )
 
-client = VLMClient(config)
+client = create_client("grok", config=config)
+response = client.query(prompt, system_prompt)
 ```
 
-### Library Settings
+### Pipeline (`main.py`)
+
+**Main orchestration with batched execution:**
+
+1. **Load Config:** Read YAML configuration
+2. **Phase 1:** Find similar programs (parallel)
+3. **Phase 2A:** Generate K hypotheses (batched, parallel)
+4. **Phase 2B:** Validate hypotheses (batched, parallel)
+5. **Phase 2C:** Generate code (batched, parallel)
+6. **Selection:** Test all K programs, select best
+
+**Key Function:**
+```python
+def process_directory(
+    data_dir: str,
+    vlm_client_phase1: BaseVLMClient,
+    vlm_client_phase2: BaseVLMClient,
+    prompter: VLMPrompter,
+    library: ProgramLibrary,
+    timeout: int = 2,
+    k_samples: int = 1,
+    max_find_similar_workers: int = 4,
+    log_dir: str = "logs",
+    verbose: bool = True,
+    similar: bool = True,
+    few_shot: bool = True
+) -> List[TaskResult]
+```
+
+### Program Library (`utils/library.py`)
+
+**Execution-based similarity search:**
 
 ```python
-# Change number of similar programs
-similar_programs = library.find_similar(keywords, top_k=3)  # Default: 5
+library = ProgramLibrary()
+
+# Find similar programs by execution
+similar = library.find_similar(
+    train_examples=task['train'],
+    top_k=5,
+    min_similarity=0.1,
+    timeout=2
+)
+
+# Add successful solutions
+if score == 1.0:
+    library.add(task_id, program_code)
 ```
 
-## 📈 Performance Optimization
+### DSL (`utils/dsl.py`)
 
-### Early Stopping
-
-The system stops early when:
-1. ✅ Library has perfect match (score=1.0)
-2. ✅ Generated code scores 1.0
-3. ⏭️ Skip Phase 2 if library match is perfect
-
-### Token Efficiency
-
-| Component | Tokens | % of Context |
-|-----------|--------|--------------|
-| Phase 1   | ~1,561 | 0.8%        |
-| Phase 2   | ~2,497 | 1.2%        |
-| **Total** | ~4,058 | **2.0%**    |
-
-### Cost Per Task
-
-With Grok API (~$3/1M tokens):
-- Phase 1: ~$0.0047
-- Phase 2: ~$0.0075
-- **Total: ~$0.012 per task**
-
-## 🐛 Debugging
-
-### Enable Verbose Output
-
-```python
-result = solve_task(..., verbose=True)
-```
-
-Shows:
-- Phase 1 completion
-- Library search results
-- Program test scores
-- Final decision logic
-
-### Common Issues
-
-**Issue:** "GROK_API_KEY environment variable not set"
-```bash
-export GROK_API_KEY=your_key_here
-```
-
-**Issue:** "Failed to extract code from response"
-- Phase 2 output didn't contain valid Python code
-- Check LLM response format
-- May need to adjust temperature or prompt
-
-**Issue:** "No similar programs found"
-- Library is empty or keywords don't match
-- Normal for first few tasks
-- Library will grow as you solve more
-
-## 📚 DSL Reference
-
-### Most Common Functions
+**100+ primitives for grid transformations:**
 
 ```python
 # Transforms
@@ -385,54 +306,227 @@ hconcat(a, b)          # stack horizontally
 # Objects
 objects(grid, T, F, T) # find connected regions
 colorfilter(objs, c)   # filter by color
-argmax(objs, size)     # largest object
 
 # Functional
 compose(f, g)          # f(g(x))
-chain(f, g, h)         # f(g(h(x)))
 fork(combine, f, g)    # combine(f(x), g(x))
-rbind(func, arg)       # partial application
 ```
 
-Full reference in `dsl.py` (100+ functions)
+## 📊 How K-Sample Diversity Works
+
+### The Problem
+Single LLM call can produce incorrect hypothesis → wrong code → failure
+
+### The Solution
+Generate K diverse hypotheses, test all, select best:
+
+```
+Task → Phase 2A (K samples) → K hypotheses
+     → Phase 2B (K samples) → K validated patterns
+     → Phase 2C (K samples) → K programs
+     → Test all K programs → Select best on test set
+```
+
+### Selection Strategy
+
+1. **Training Set:** Test all K programs on training examples
+2. **Top 2:** Select two best performers on training set
+3. **Test Set:** Test both on test examples
+4. **Final:** Select whichever performs better on test set
+5. **Fallback:** Compare with library, use library if better
+
+### Example Results
+With K=4:
+- Sample 0 selected: 40% of tasks
+- Sample 1 selected: 25% of tasks
+- Sample 2 selected: 20% of tasks
+- Sample 3 selected: 15% of tasks
+
+**Key Insight:** Different samples win on different tasks!
+
+## 🎛️ Configuration Reference
+
+### Provider Settings
+
+```yaml
+provider: "grok"  # Options: grok, qwen, gemini
+
+model:
+  name: "grok-4-fast"
+  api_base: "https://api.x.ai/v1"
+```
+
+**Provider-specific defaults:**
+
+| Provider | Model | API Base | Auth |
+|----------|-------|----------|------|
+| Grok | grok-4-fast | https://api.x.ai/v1 | GROK_API_KEY |
+| Qwen | Qwen/Qwen2.5-7B-Instruct | http://localhost:8000/v1 | None (local) |
+| Gemini | gemini-2.5-pro | https://generativelanguage.googleapis.com/v1beta | GEMINI_API_KEY |
+
+### VLM Config
+
+```yaml
+vlm_config:
+  phase1:  # Hypothesis & validation
+    max_tokens: 16384
+    max_retries: 3
+    save_prompts: false
+    prompt_log_dir: "prompts_old_dsl"
+
+  phase2:  # Code generation
+    max_tokens: 8192
+    max_retries: 3
+```
+
+### Pipeline Parameters
+
+```yaml
+process_directory:
+  data_dir: "data_v2/evaluation"    # Input task directory
+  timeout: 2                        # Execution timeout (seconds)
+  k_samples: 4                      # Number of samples per task
+  max_find_similar_workers: 56      # Parallel workers for phase 1
+  log_dir: "logs_baseline"          # Log output directory
+  verbose: false                    # Print detailed progress
+  similar: true                     # Use similarity search
+  few_shot: true                    # Include similar programs in prompts
+```
+
+### Output Settings
+
+```yaml
+output:
+  results_dir: "results/baseline"
+```
+
+## 📈 Performance & Costs
+
+### Batched Execution
+All API calls within each phase run in parallel:
+- Phase 2A: All tasks × K samples in parallel
+- Phase 2B: All tasks × K samples in parallel
+- Phase 2C: All tasks × K samples in parallel
+
+### Token Usage (per task with K=4)
+- Phase 2A: ~4 calls × 16K tokens = 64K tokens
+- Phase 2B: ~4 calls × 16K tokens = 64K tokens
+- Phase 2C: ~4 calls × 8K tokens = 32K tokens
+- **Total: ~160K tokens per task**
+
+### Approximate Costs (K=4)
+With Grok API (~$5/1M input, $15/1M output tokens):
+- ~$0.80-$2.40 per task (depending on output length)
+- 100 tasks: ~$80-$240
+
+*Note: Costs vary by provider and token usage*
+
+## 🔍 Debugging & Monitoring
+
+### Enable Verbose Mode
+```yaml
+process_directory:
+  verbose: true
+```
+
+Shows:
+- Phase timing breakdown
+- Per-task progress with scores
+- Sample selection statistics
+- Library matches
+
+### Logs
+All outputs saved to configured directories:
+- **Pipeline logs:** `<log_dir>/<task_id>_phase2*_*.txt`
+- **Selection logs:** `<log_dir>/<task_id>_selection_summary.txt`
+- **SLURM logs:** `logs/slurm_<job_id>.out`
+- **Results:** `<results_dir>/results.json` and `summary.csv`
+
+### Common Issues
+
+**Config file not found:**
+```bash
+ls config/config.yaml  # Make sure it exists
+```
+
+**API key errors:**
+```bash
+cat .env  # Check API keys are set
+```
+
+**Import errors:**
+```bash
+# Make sure you're in project root
+cd /home/user/llms_ftw
+python src/main.py
+```
+
+## 🆚 Architecture Evolution
+
+### Before (Old)
+```
+VLMConfig → create_client() → GrokClient/QwenClient/GeminiClient
+                                        ↓
+                             ThreadSafeVLMClient (wrapper)
+                                        ↓
+                                  Catches errors
+```
+- 3 separate client classes (GrokClient, QwenClient, GeminiClient)
+- Wrapper class for error handling
+- Hardcoded hyperparameters in main.py
+
+### After (Current)
+```
+config.yaml → load_config() → VLMConfig → create_client()
+                                              ↓
+                              OpenAICompatibleClient OR GeminiClient
+                              (built-in error suppression)
+```
+- 2 client classes (merged OpenAI-compatible ones)
+- No wrapper needed (built-in suppress_errors)
+- All configuration in YAML
+
+**Result:**
+- 40+ lines of duplicate code removed
+- Cleaner architecture
+- Easier to add new providers
+- All settings in one place
 
 ## 🔮 Future Enhancements
 
-### Phase 2b: Evolution (Not Yet Implemented)
+### Planned Features
+- [ ] Command-line config file selection: `python main.py --config exp1.yaml`
+- [ ] Adaptive K sampling (increase K for harder tasks)
+- [ ] Semantic library search with embeddings
+- [ ] LLM-guided program repair with error feedback
+- [ ] Multi-model ensembles (combine Grok + Gemini)
 
-```python
-# Planned mutation strategies:
-1. Function substitution (hmirror ↔ vmirror)
-2. Parameter tweaking (objects(I, T, F, T) → objects(I, T, T, T))
-3. Add/remove steps
-4. Control flow changes
-5. LLM-guided repair with error feedback
+### Adding New Providers
+
+For OpenAI-compatible APIs (Claude, GPT, etc.):
+```yaml
+# Just update config.yaml - no code changes needed!
+provider: "claude"
+model:
+  name: "claude-sonnet-4"
+  api_base: "https://api.anthropic.com/v1"
 ```
 
-### Semantic Library Search
-
-Replace keyword matching with embeddings:
-```python
-from sentence_transformers import SentenceTransformer
-
-library.find_similar_semantic(pattern, top_k=5)
+Then add to environment:
+```bash
+export CLAUDE_API_KEY=your_key
 ```
 
-### Test-Time Compute
+## 📚 References
 
-Allocate more retries for hard tasks:
-```python
-solve_task(..., max_attempts=10, adaptive_budget=True)
-```
+- **ARC Dataset:** https://github.com/fchollet/ARC
+- **DSL Design:** Based on functional programming primitives
+- **K-Sample Diversity:** Inspired by best-of-N sampling strategies
 
 ## 📄 License
 
 Your project - use as you wish!
 
-## 🤝 Contributing
-
-This is your personal ARC solver. Customize as needed!
-
 ---
 
-**Ready to solve some ARC tasks!** 🎯
+**Ready to solve ARC tasks with configurable multi-provider LLMs!** 🚀

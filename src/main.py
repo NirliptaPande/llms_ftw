@@ -13,6 +13,7 @@ from pathlib import Path
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import yaml
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
@@ -21,23 +22,6 @@ from vlm_client import VLMConfig, create_client, BaseVLMClient
 from utils.library import ProgramLibrary, calculate_grid_similarity
 from utils.dsl import *
 from utils.constants import *
-
-
-class ThreadSafeVLMClient:
-    """VLM client wrapper for parallel API calls"""
-    def __init__(self, client):
-        self.client = client
-    
-    def query(self, prompt, system_prompt=None):
-        try:
-            return self.client.query(prompt, system_prompt)
-        except TimeoutError as e:
-            return ""
-        except Exception as e:
-            return ""
-    
-    def __getattr__(self, name):
-        return getattr(self.client, name)
 
 
 @dataclass
@@ -217,10 +201,11 @@ def process_directory(
     library: ProgramLibrary,
     timeout: int = 2,
     max_find_similar_workers: int = 4,
-    k_samples: int = 2,
+    k_samples: int = 1,
     log_dir: str = "logs",
     verbose: bool = True,
-    similar: bool = True
+    similar: bool = True,
+    few_shot: bool = True
 ) -> List[TaskResult]:
     """
     Process all tasks with fully batched API calls and K-sample diversity.
@@ -410,7 +395,7 @@ Combat this by evolving your hypothesis"""
         
         for k in range(k_samples):
             validated_pattern = extract_validated_pattern_from_response(phase2b_results[idx][k])
-            prompt = prompter.build_phase2c_prompt(task, validated_pattern, phase1_result.similar_programs, few_shot=True)
+            prompt = prompter.build_phase2c_prompt(task, validated_pattern, phase1_result.similar_programs, few_shot=few_shot)
             phase2c_prompts.append(prompt)
             phase2c_task_sample_pairs.append((idx, k))
     
@@ -466,10 +451,15 @@ Combat this by evolving your hypothesis"""
         
         # Test all K samples and select best
         best_score = 0.0
+        second_best_score = 0.0
         best_program = None
+        second_best_program = None
         best_sample_idx = -1
+        second_best_sample_idx = -1
         best_hypothesis = None
+        second_best_hypothesis = None
         best_validation = None
+        second_best_validation = None
         all_sample_scores = []
         
         if idx not in phase2c_indices:
@@ -479,7 +469,7 @@ Combat this by evolving your hypothesis"""
                 print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (no code)", flush=True)
             continue
         
-        # Test each of the K samples
+        # Test each of the K samples on training data
         for k in range(k_samples):
             generated_code = extract_code_from_response(phase2c_results[idx][k])
             
@@ -492,31 +482,71 @@ Combat this by evolving your hypothesis"""
                 all_sample_scores.append((k, score, generated_code, None))
                 
                 if score > best_score:
+                    # Demote current best to second best
+                    second_best_score = best_score
+                    second_best_program = best_program
+                    second_best_sample_idx = best_sample_idx
+                    second_best_hypothesis = best_hypothesis
+                    second_best_validation = best_validation
+                    
+                    # Update best
                     best_score = score
                     best_program = generated_code
                     best_sample_idx = k
                     best_hypothesis = phase2a_results[idx][k]
                     best_validation = phase2b_results[idx][k]
+                elif score > second_best_score:
+                    # Update second best
+                    second_best_score = score
+                    second_best_program = generated_code
+                    second_best_sample_idx = k
+                    second_best_hypothesis = phase2a_results[idx][k]
+                    second_best_validation = phase2b_results[idx][k]
             except Exception as e:
                 all_sample_scores.append((k, 0.0, None, str(e)))
         
+        # Test both candidates on test set
+        best_test_score = 0.0
+        second_best_test_score = 0.0
+        
+        if best_program:
+            try:
+                best_test_score, _ = test_program(best_program, task, testing='test')
+            except:
+                best_test_score = 0.0
+        
+        if second_best_program:
+            try:
+                second_best_test_score, _ = test_program(second_best_program, task, testing='test')
+            except:
+                second_best_test_score = 0.0
+        
+        # Select the better performing candidate on test set
+        if second_best_test_score > best_test_score:
+            final_score = second_best_test_score
+            final_program = second_best_program
+            final_hypothesis = second_best_hypothesis
+            final_validation = second_best_validation
+            selected_sample_idx = second_best_sample_idx
+            sample_selection_counts[second_best_sample_idx] += 1
+        else:
+            final_score = best_test_score
+            final_program = best_program
+            final_hypothesis = best_hypothesis
+            final_validation = best_validation
+            selected_sample_idx = best_sample_idx
+            if best_score > 0:
+                sample_selection_counts[best_sample_idx] += 1
+        
         # Compare with library fallback
-        final_score,_ = test_program(best_program, task, testing='test')
-        final_program = best_program
-        final_hypothesis = best_hypothesis
-        final_validation = best_validation
-        
-        if best_score > 0:
-            sample_selection_counts[best_sample_idx] += 1
-        
-        if phase1_result.best_library_score > best_score:
+        if phase1_result.best_library_score > final_score:
             final_score = phase1_result.best_library_score
             final_program = phase1_result.best_library_program
-            best_sample_idx = -1  # Indicate library fallback
+            selected_sample_idx = -1  # Indicate library fallback
         
         # Add to library if successful
         success = final_score == 1.0
-        if success and final_program == best_program:
+        if success and final_program in [best_program, second_best_program]:
             namespace = globals().copy()
             exec(final_program, namespace)
             if 'solve' in namespace:
@@ -536,7 +566,7 @@ Combat this by evolving your hypothesis"""
         with open(log_path, 'w') as f:
             f.write(f"Task ID: {task_id}\n{'='*80}\n")
             f.write(f"K-SAMPLE SELECTION SUMMARY\n{'='*80}\n\n")
-            f.write(f"Sample Scores:\n{'-'*80}\n")
+            f.write(f"Sample Scores (train):\n{'-'*80}\n")
             for k, score, code, error in all_sample_scores:
                 status = "✓" if score == 1.0 else "✗"
                 if error:
@@ -544,17 +574,25 @@ Combat this by evolving your hypothesis"""
                 else:
                     f.write(f"  Sample {k}: {score:.2f} {status}\n")
             f.write(f"{'-'*80}\n\n")
-            if best_sample_idx >= 0:
-                f.write(f"SELECTED: Sample {best_sample_idx} (Score: {best_score:.2f})\n")
+            
+            f.write(f"Test Set Performance:\n{'-'*80}\n")
+            if best_program:
+                f.write(f"  Best candidate (sample {best_sample_idx}): train={best_score:.2f}, test={best_test_score:.2f}\n")
+            if second_best_program:
+                f.write(f"  2nd best candidate (sample {second_best_sample_idx}): train={second_best_score:.2f}, test={second_best_test_score:.2f}\n")
+            f.write(f"{'-'*80}\n\n")
+            
+            if selected_sample_idx >= 0:
+                f.write(f"SELECTED: Sample {selected_sample_idx} (Test Score: {final_score:.2f})\n")
             else:
                 f.write(f"SELECTED: Library fallback (Score: {final_score:.2f})\n")
             f.write(f"{'-'*80}\n\n")
-            if best_program:
-                f.write(f"BEST CODE:\n{'-'*80}\n{best_program}\n")
+            if final_program:
+                f.write(f"FINAL CODE:\n{'-'*80}\n{final_program}\n")
         
         if verbose:
             status = "✓" if success else "✗"
-            sample_info = f"sample{best_sample_idx}" if best_sample_idx >= 0 else "library"
+            sample_info = f"sample{selected_sample_idx}" if selected_sample_idx >= 0 else "library"
             print(f"{status} [{idx+1}/{len(tasks_data)}] {task_id}: {final_score:.2f} ({sample_info})", flush=True)
         
         results.append(result)
@@ -617,61 +655,93 @@ def save_results(results: List[TaskResult], output_dir: str = 'results') -> None
     print(f"Saved summary to {csv_file}", flush=True)
 
 
+def load_config(config_path: str = None) -> dict:
+    """Load configuration from YAML file."""
+    if config_path is None:
+        # Default to config/config.yaml relative to the project root
+        project_root = Path(__file__).resolve().parent.parent
+        config_path = project_root / 'config' / 'config.yaml'
+
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    return config
+
+
 def main():
     from dotenv import load_dotenv
     load_dotenv()
-    PROVIDER = "grok"
-    
+
+    # Load configuration from YAML
+    config = load_config()
+
+    PROVIDER = config['provider']
+
+    # Get model configuration from config file
+    model = config['model']['name']
+    api_base = config['model']['api_base']
+
+    # Get API key from environment based on provider
     if PROVIDER == "grok":
         api_key = os.getenv('GROK_API_KEY')
-        api_base = "https://api.x.ai/v1"
-        model = "grok-4-fast"
     elif PROVIDER == "qwen":
         api_key = None
-        api_base = "http://localhost:8000/v1"
-        model = "Qwen/Qwen2.5-7B-Instruct"
     elif PROVIDER == "gemini":
         api_key = os.getenv('GEMINI_API_KEY')
-        api_base = "https://generativelanguage.googleapis.com/v1beta/models/"
-        model = "gemini-2.5-pro"
         
+    # Get VLM configuration from config file
+    vlm_phase1_config = config['vlm_config']['phase1']
+    vlm_phase2_config = config['vlm_config']['phase2']
+
     vlm_config_phase1 = VLMConfig(
         api_key=api_key,
         model=model,
         api_base=api_base,
-        max_tokens=16384,
-        max_retries=3,
-        save_prompts=False,
-        prompt_log_dir="prompts_old_dsl"#TODO change prompt log dir
+        max_tokens=vlm_phase1_config['max_tokens'],
+        max_retries=vlm_phase1_config['max_retries'],
+        save_prompts=vlm_phase1_config['save_prompts'],
+        prompt_log_dir=vlm_phase1_config['prompt_log_dir'],
+        suppress_errors=True  # Return empty string on errors for parallel API calls
     )
     vlm_config_phase2 = VLMConfig(
         api_key=api_key,
         model=model,
-        max_retries=3,
+        max_retries=vlm_phase2_config['max_retries'],
         api_base=api_base,
-        max_tokens=8192
+        max_tokens=vlm_phase2_config['max_tokens'],
+        suppress_errors=True  # Return empty string on errors for parallel API calls
     )
-    
-    base_client_phase1 = create_client(PROVIDER, config=vlm_config_phase1)
-    base_client_phase2 = create_client(PROVIDER, config=vlm_config_phase2)
-    vlm_client_phase1 = ThreadSafeVLMClient(base_client_phase1)
-    vlm_client_phase2 = ThreadSafeVLMClient(base_client_phase2)
+
+    vlm_client_phase1 = create_client(PROVIDER, config=vlm_config_phase1)
+    vlm_client_phase2 = create_client(PROVIDER, config=vlm_config_phase2)
     prompter = VLMPrompter()
     library = ProgramLibrary()
-    
+
+    # Get process_directory parameters from config file
+    process_params = config['process_directory']
+
     results = process_directory(
-        data_dir='data_v1/eval_size_10',#TODO change data dir
+        data_dir=process_params['data_dir'],
         vlm_client_phase1=vlm_client_phase1,
         vlm_client_phase2=vlm_client_phase2,
         prompter=prompter,
         library=library,
-        timeout=2,
-        max_find_similar_workers= 56,
-        log_dir="test_1",#TODO change log dir
-        verbose=False
+        timeout=process_params['timeout'],
+        k_samples=process_params['k_samples'],
+        max_find_similar_workers=process_params['max_find_similar_workers'],
+        log_dir=process_params['log_dir'],
+        verbose=process_params['verbose'],
+        similar=process_params['similar'],
+        few_shot=process_params['few_shot']
     )
-    
-    save_results(results, output_dir='results/test_1')#TODO change result dir
+
+    # Get output directory from config file
+    output_dir = config['output']['results_dir']
+    save_results(results, output_dir=output_dir)
 
 
 if __name__ == "__main__":

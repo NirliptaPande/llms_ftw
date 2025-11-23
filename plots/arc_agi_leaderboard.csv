@@ -1,0 +1,90 @@
+AI System,Organization,System Type,ARC-AGI-1,ARC-AGI-2,Cost/Task,Code / Paper,ARC_AGI_1,ARC_AGI_2,Cost
+J. Berman (2025),Bespoke,Refinement,79.6%,29.4%,$30.40,💻,79.6,29.4,30.4
+E. Pang (2025),Bespoke,Refinement,77.1%,26.0%,$3.97,💻,77.1,26.0,3.97
+GPT-5 Pro,OpenAI,CoT,70.2%,18.3%,$7.14,📄,70.2,18.3,7.14
+Grok 4 (Thinking),xAI,CoT,66.7%,16.0%,$2.17,📄,66.7,16.0,2.17
+Claude Sonnet 4.5 (Thinking 32K),Anthropic,CoT,63.7%,13.6%,$0.759,📄,63.7,13.6,0.759
+GPT-5 (High),OpenAI,CoT,65.7%,9.9%,$0.730,—,65.7,9.9,0.73
+Claude Opus 4 (Thinking 16K),Anthropic,CoT,35.7%,8.6%,$1.93,📄,35.7,8.6,1.93
+GPT-5 (Medium),OpenAI,CoT,56.2%,7.5%,$0.449,—,56.2,7.5,0.449
+Claude Sonnet 4.5 (Thinking 8K),Anthropic,CoT,46.5%,6.9%,$0.235,📄,46.5,6.9,0.235
+Claude Sonnet 4.5 (Thinking 16K),Anthropic,CoT,48.3%,6.9%,$0.350,📄,48.3,6.9,0.35
+o3 (High),OpenAI,CoT,60.8%,6.5%,$0.834,—,60.8,6.5,0.834
+Tiny Recursion Model (TRM),Bespoke,Refinement,40.0%,6.3%,$2.10,📄💻,40.0,6.3,2.1
+o4-mini (High),OpenAI,CoT,58.7%,6.1%,$0.856,—,58.7,6.1,0.856
+Claude Sonnet 4 (Thinking 16K),Anthropic,CoT,40.0%,5.9%,$0.486,📄,40.0,5.9,0.486
+Claude Sonnet 4.5 (Thinking 1K),Anthropic,CoT,31.0%,5.8%,$0.142,📄,31.0,5.8,0.142
+Grok 4 (Fast Reasoning),xAI,CoT,48.5%,5.3%,$0.061,📄,48.5,5.3,0.061
+o3-Pro (High),OpenAI,CoT + Synthesis,59.3%,4.9%,$7.55,📄,59.3,4.9,7.55
+Gemini 2.5 Pro (Thinking 32K),Google,CoT,37.0%,4.9%,$0.757,📄,37.0,4.9,0.757
+Claude Opus 4 (Thinking 8K),Anthropic,CoT,30.7%,4.5%,$1.16,📄,30.7,4.5,1.16
+GPT-5 Mini (High),OpenAI,CoT,54.3%,4.4%,$0.198,—,54.3,4.4,0.198
+Gemini 2.5 Pro (Thinking 16K),Google,CoT,41.0%,4.0%,$0.715,📄,41.0,4.0,0.715
+GPT-5 Mini (Medium),OpenAI,CoT,37.3%,4.0%,$0.063,—,37.3,4.0,0.063
+Claude Haiku 4.5 (Thinking 32K),Anthropic,CoT,47.7%,4.0%,$0.377,📄,47.7,4.0,0.377
+o3-preview (Low)*,OpenAI,CoT + Synthesis,75.7%,4.0%,$200.00,📄,75.7,4.0,200.0
+Gemini 2.5 Pro (Preview),Google,CoT,33.0%,3.8%,$0.813,📄,33.0,3.8,0.813
+Claude Sonnet 4.5,Anthropic,Base LLM,25.5%,3.8%,$0.130,📄,25.5,3.8,0.13
+"Gemini 2.5 Pro (Preview, Thinking 1K)",Google,CoT,31.3%,3.4%,$0.804,📄,31.3,3.4,0.804
+o3-mini (High),OpenAI,CoT,34.5%,3.0%,$0.547,—,34.5,3.0,0.547
+o3 (Medium),OpenAI,CoT,53.8%,3.0%,$0.479,—,53.8,3.0,0.479
+Gemini 2.5 Pro (Thinking 8K),Google,CoT,29.5%,2.9%,$0.444,📄,29.5,2.9,0.444
+Claude Haiku 4.5 (Thinking 16K),Anthropic,CoT,37.3%,2.8%,$0.139,📄,37.3,2.8,0.139
+GPT-5 Nano (High),OpenAI,CoT,16.7%,2.6%,$0.029,—,16.7,2.6,0.029
+Gemini 2.5 Flash (Preview) (Thinking 24K),Google,CoT,32.3%,2.5%,$0.319,📄💻,32.3,2.5,0.319
+ARChitects,ARC Prize 2024,Custom,56.0%,2.5%,$0.200,📄💻,56.0,2.5,0.2
+o4-mini (Medium),OpenAI,CoT,41.8%,2.4%,$0.231,—,41.8,2.4,0.231
+Gemini 2.5 Flash (Preview) (Thinking 1K),Google,CoT,16.0%,2.2%,$0.030,📄💻,16.0,2.2,0.03
+Gemini 2.5 Flash (Preview) (Thinking 8K),Google,CoT,25.8%,2.1%,$0.199,📄💻,25.8,2.1,0.199
+Claude Sonnet 4 (Thinking 8K),Anthropic,CoT,29.0%,2.1%,$0.265,📄,29.0,2.1,0.265
+o3-mini (Medium),OpenAI,CoT,22.3%,2.1%,$0.284,—,22.3,2.1,0.284
+o3-Pro (Low),OpenAI,CoT + Synthesis,44.3%,2.1%,$2.23,📄,44.3,2.1,2.23
+Hierarchical Reasoning Model (HRM),Bespoke,Refinement,32.0%,2.0%,$1.68,—,32.0,2.0,1.68
+o3 (Low),OpenAI,CoT,41.5%,2.0%,$0.234,—,41.5,2.0,0.234
+Gemini 2.5 Flash (Preview) (Thinking 16K),Google,CoT,33.3%,2.0%,$0.317,📄💻,33.3,2.0,0.317
+o3-Pro (Medium),OpenAI,CoT + Synthesis,57.0%,1.9%,$4.74,📄,57.0,1.9,4.74
+GPT-5 (Low),OpenAI,CoT,44.0%,1.9%,$0.190,—,44.0,1.9,0.19
+Gemini 2.5 Flash (Preview),Google,CoT,33.3%,1.7%,$0.057,📄💻,33.3,1.7,0.057
+o4-mini (Low),OpenAI,CoT,21.3%,1.7%,$0.050,—,21.3,1.7,0.05
+GPT-5 Mini (Minimal),OpenAI,CoT,5.3%,1.7%,$0.009,—,5.3,1.7,0.009
+Claude Haiku 4.5 (Thinking 8K),Anthropic,CoT,25.5%,1.7%,$0.091,📄,25.5,1.7,0.091
+Icecuber,ARC Prize 2024,Custom,17.0%,1.6%,$0.130,💻,17.0,1.6,0.13
+Gemini 2.0 Flash,Google,Base LLM,N/A,1.3%,$0.004,💻,,1.3,0.004
+Deepseek R1,Deepseek,CoT,15.8%,1.3%,$0.080,💻,15.8,1.3,0.08
+Codex Mini (Latest),OpenAI,CoT,27.3%,1.3%,$0.230,📄,27.3,1.3,0.23
+Claude Sonnet 4,Anthropic,Base LLM,23.8%,1.3%,$0.127,📄,23.8,1.3,0.127
+Claude Opus 4,Anthropic,CoT,22.5%,1.3%,$0.639,📄,22.5,1.3,0.639
+Qwen3-235b-a22b Instruct (25/07),Alibaba,Base LLM,11.0%,1.3%,$0.004,📄,11.0,1.3,0.004
+Claude Haiku 4.5,Anthropic,Base LLM,14.3%,1.3%,$0.043,📄,14.3,1.3,0.043
+Claude Haiku 4.5 (Thinking 1K),Anthropic,CoT,16.8%,1.3%,$0.047,📄,16.8,1.3,0.047
+Deepseek R1 (05/28),Deepseek,CoT,21.2%,1.1%,$0.053,📄,21.2,1.1,0.053
+Claude 3.7 (8K),Anthropic,CoT,21.2%,0.9%,$0.360,💻,21.2,0.9,0.36
+GPT-5 Nano (Medium),OpenAI,CoT,20.7%,0.9%,$0.014,—,20.7,0.9,0.014
+Claude Sonnet 4 (Thinking 1K),Anthropic,CoT,28.0%,0.9%,$0.142,📄,28.0,0.9,0.142
+o1-mini,OpenAI,CoT,14.0%,0.8%,$0.191,📄💻,14.0,0.8,0.191
+GPT-5 Mini (Low),OpenAI,CoT,26.3%,0.8%,$0.019,—,26.3,0.8,0.019
+Gemini 1.5 Pro,Google,Base LLM,N/A,0.8%,$0.040,💻,,0.8,0.04
+GPT-4.5,OpenAI,Base LLM,10.3%,0.8%,$2.10,💻,10.3,0.8,2.1
+Claude 3.7 (16K),Anthropic,CoT,28.6%,0.7%,$0.510,💻,28.6,0.7,0.51
+GPT-4.1,OpenAI,Base LLM,5.5%,0.4%,$0.069,📄💻,5.5,0.4,0.069
+Grok 3 Mini (Low),xAI,CoT,16.5%,0.4%,$0.013,📄,16.5,0.4,0.013
+Claude 3.7 (1K),Anthropic,CoT,11.6%,0.4%,$0.140,💻,11.6,0.4,0.14
+Claude 3.7,Anthropic,Base LLM,13.6%,0.0%,$0.120,💻,13.6,0.0,0.12
+GPT-4o,OpenAI,Base LLM,4.5%,0.0%,$0.080,💻,4.5,0.0,0.08
+GPT-4o-mini,OpenAI,Base LLM,N/A,0.0%,$0.010,💻,,0.0,0.01
+Avg. Mturker,Human,N/A,77.0%,N/A,$3.00,—,77.0,,3.0
+Stem Grad,Human,N/A,98.0%,N/A,$10.00,—,98.0,,10.0
+Llama 4 Maverick,Meta,Base LLM,4.4%,0.0%,$0.012,📄💻,4.4,0.0,0.012
+Llama 4 Scout,Meta,Base LLM,0.5%,0.0%,$0.006,📄💻,0.5,0.0,0.006
+GPT-4.1-Nano,OpenAI,Base LLM,0.0%,0.0%,$0.004,📄💻,0.0,0.0,0.004
+GPT-4.1-Mini,OpenAI,Base LLM,3.5%,0.0%,$0.014,📄💻,3.5,0.0,0.014
+o3-mini (Low),OpenAI,CoT,14.5%,0.0%,$0.062,—,14.5,0.0,0.062
+Claude Opus 4 (Thinking 1K),Anthropic,CoT,27.0%,0.0%,$0.750,📄,27.0,0.0,0.75
+Grok 3,xAI,Base LLM,5.5%,0.0%,$0.142,📄,5.5,0.0,0.142
+Magistral Small,Mistral,CoT,5.0%,0.0%,$0.049,📄,5.0,0.0,0.049
+Magistral Medium,Mistral,CoT,5.9%,0.0%,$0.108,📄,5.9,0.0,0.108
+Magistral Medium (Thinking),Mistral,CoT,6.1%,0.0%,$0.123,📄,6.1,0.0,0.123
+Gemini 2.5 Pro (Thinking 1K),Google,CoT,16.0%,0.0%,$0.088,📄,16.0,0.0,0.088
+GPT-5 (Minimal),OpenAI,Base LLM,6.0%,0.0%,$0.056,—,6.0,0.0,0.056
+GPT-5 Nano (Low),OpenAI,CoT,4.0%,0.0%,$0.003,—,4.0,0.0,0.003
+GPT-5 Nano (Minimal),OpenAI,CoT,1.5%,0.0%,$0.003,—,1.5,0.0,0.003

@@ -14,6 +14,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
+import threading
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
@@ -46,14 +47,11 @@ class Phase1Result:
     best_library_program: Optional[str]
     perfect_match_found: bool
     error: Optional[str] = None
-import signal
 
-def test_program(program_code: str, task: Dict, testing: str='test') -> Tuple[float, List[Tuple[Any, Any, bool]]]:
+
+def test_program(program_code: str, task: Dict, testing: str='test', timeout: int=2) -> Tuple[float, List[Tuple[Any, Any, bool]]]:
     """Test a program against task test examples."""
     namespace = globals().copy()
-    
-    def timeout_handler(signum, frame):
-        raise TimeoutError("Execution timed out")
     
     try:
         exec(program_code, namespace)
@@ -70,27 +68,35 @@ def test_program(program_code: str, task: Dict, testing: str='test') -> Tuple[fl
             expected = example['output']
             if isinstance(inp, list):
                 inp = tuple(tuple(row) for row in inp)
-            try:
-                # Set up the timeout
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(2)  # 2 second timeout
-                
-                actual = solve_fn(inp)
-                
-                # Cancel the alarm
-                signal.alarm(0)
-                
+            
+            # Thread-based timeout execution
+            result_container = {'output': None, 'error': None}
+            
+            def run_solve():
+                try:
+                    result_container['output'] = solve_fn(inp)
+                except Exception as e:
+                    result_container['error'] = e
+            
+            thread = threading.Thread(target=run_solve)
+            thread.daemon = True
+            thread.start()
+            thread.join(timeout)
+            
+            if thread.is_alive():
+                # Timeout occurred
+                scores.append(0.0)
+                results.append((expected, None, False))
+            elif result_container['error']:
+                # Exception occurred
+                scores.append(0.0)
+                results.append((expected, None, False))
+            else:
+                # Success
+                actual = result_container['output']
                 score = calculate_grid_similarity(actual, expected)
                 scores.append(score)
                 results.append((expected, actual, score == 1.0))
-            except TimeoutError:
-                signal.alarm(0)  # Cancel the alarm
-                scores.append(0.0)
-                results.append((expected, None, False))
-            except Exception as e:
-                signal.alarm(0)  # Cancel the alarm
-                scores.append(0.0)
-                results.append((expected, None, False))
         
         avg_score = sum(scores) / len(scores) if scores else 0.0
         return avg_score, results
@@ -121,7 +127,8 @@ def phase1_find_similar(
     library: ProgramLibrary,
     timeout: int = 2,
     verbose: bool = True,
-    similar: bool = True
+    similar: bool = True,
+    n_workers: int = None
 ) -> Phase1Result:
     """Phase 1: Find similar programs by execution."""
     try:
@@ -131,7 +138,8 @@ def phase1_find_similar(
             min_similarity=0.1,
             timeout=timeout,
             verbose=verbose,
-            similar=similar
+            similar=similar,
+            n_workers=n_workers
         )
         
         best_library_score = 0.0
@@ -256,7 +264,7 @@ def process_directory(
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     
     # ========================================================================
-    # PHASE 1: Find similar (parallel)
+    # PHASE 1: Find similar (parallel execution within find_similar)
     # ========================================================================
     if verbose:
         print(f"Phase 1: Finding similar programs...", flush=True)
@@ -265,7 +273,11 @@ def process_directory(
     phase1_results = [None] * len(tasks_data)
 
     for idx, (task_id, task) in enumerate(tasks_data):
-        result = phase1_find_similar(task, task_id, library, timeout, verbose, similar)
+        # Pass max_find_similar_workers to control parallelism within library search
+        result = phase1_find_similar(
+            task, task_id, library, timeout, verbose, similar, 
+            n_workers=max_find_similar_workers
+        )
         phase1_results[idx] = result
     
     time_phase1 = time.time()
@@ -301,12 +313,14 @@ def process_directory(
     
     phase2a_outputs = []
     if phase2a_prompts:
-        system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. Remember the puzzles are not very complex and usually involve simple sequential transformations.
+        system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns.
             
 Remember: Your first hypothesis is sticky and excessively convincing to you.
 Combat this by evolving your hypothesis as you see each training example."""
         
-        with ThreadPoolExecutor(max_workers=len(phase2a_prompts)) as executor:
+        # Cap max_workers to avoid resource exhaustion
+        max_api_workers = 50
+        with ThreadPoolExecutor(max_workers=min(len(phase2a_prompts), max_api_workers)) as executor:
             futures = [executor.submit(vlm_client_phase1.query, p, system_prompt) for p in phase2a_prompts]
             phase2a_outputs = [f.result() for f in futures]
     
@@ -357,7 +371,8 @@ You are given an initial hypothesis about the puzzle. If the hypothesis doesn't 
 Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple transformation that applies to all samples, both training and test.
 Combat this by evolving your hypothesis"""
         
-        with ThreadPoolExecutor(max_workers=len(phase2b_prompts)) as executor:
+        max_api_workers = 50
+        with ThreadPoolExecutor(max_workers=min(len(phase2b_prompts), max_api_workers)) as executor:
             futures = [executor.submit(vlm_client_phase1.query, p, system_prompt) for p in phase2b_prompts]
             phase2b_outputs = [f.result() for f in futures]
     
@@ -406,7 +421,8 @@ Combat this by evolving your hypothesis"""
     if phase2c_prompts:
         system_prompt = "You are an expert at generating code using the given DSL primitives to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training and test examples and some similar programs you might find useful as reference. Generate a Python function `def solve(I):` that implements the described transformation using ONLY the provided DSL primitives. Ensure your code is syntactically correct and follows best practices"
         
-        with ThreadPoolExecutor(max_workers=len(phase2c_prompts)) as executor:
+        max_api_workers = 50
+        with ThreadPoolExecutor(max_workers=min(len(phase2c_prompts), max_api_workers)) as executor:
             futures = [executor.submit(vlm_client_phase2.query, p, system_prompt) for p in phase2c_prompts]
             phase2c_outputs = [f.result() for f in futures]
     
@@ -418,58 +434,62 @@ Combat this by evolving your hypothesis"""
     print(f"Phase 2C complete: {time_phase2c - time_phase2b:.1f}s\n", flush=True)
     
     # ========================================================================
-    # CODE EXECUTION & BEST-OF-K SELECTION
+    # CODE EXECUTION & BEST-OF-K SELECTION (WITH REPAIR LOOP)
     # ========================================================================
     if verbose:
         print(f"Testing programs (selecting best of {k_samples})...", flush=True)
     
-    results = []
+    results = [None] * len(tasks_data)
     successful = 0
     total_score = 0.0
     sample_selection_counts = [0] * k_samples  # Track which samples win
     
-    for idx, (task_id, task) in enumerate(tasks_data):
+    library_lock = threading.Lock()
+    print_lock = threading.Lock()
+
+    def evaluate_task(args):
+        idx, task_id, task = args
         phase1_result = phase1_results[idx]
-        
-        # Handle perfect match
-        if phase1_result.perfect_match_found:
-            result = TaskResult(task_id, True, 1.0, phase1_result.best_library_program)
-            results.append(result)
-            successful += 1
-            total_score += 1.0
-            if verbose:
-                print(f"✓ [{idx+1}/{len(tasks_data)}] {task_id}: 1.00 (library)", flush=True)
-            continue
-        
-        # Handle phase1 errors
-        if phase1_result.error:
-            result = TaskResult(task_id, False, 0.0, error=f"Phase 1: {phase1_result.error}")
-            results.append(result)
-            if verbose:
-                print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (error)", flush=True)
-            continue
         
         # Test all K samples and select best
         best_score = 0.0
-        second_best_score = 0.0
         best_program = None
-        second_best_program = None
         best_sample_idx = -1
-        second_best_sample_idx = -1
         best_hypothesis = None
-        second_best_hypothesis = None
         best_validation = None
-        second_best_validation = None
         all_sample_scores = []
         
         if idx not in phase2c_indices:
-            result = TaskResult(task_id, False, 0.0, error="No code generated")
-            results.append(result)
-            if verbose:
-                print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (no code)", flush=True)
-            continue
+            # Task was skipped (e.g., perfect library match on train or error)
+            # Still need to evaluate library program on TEST set if available
+            if phase1_result.best_library_program:
+                library_test_score, _ = test_program(phase1_result.best_library_program, task, testing='test', timeout=timeout)
+                success = library_test_score == 1.0
+                
+                if success and phase1_result.best_library_program:
+                    namespace = globals().copy()
+                    try:
+                        exec(phase1_result.best_library_program, namespace)
+                        if 'solve' in namespace:
+                            with library_lock:
+                                library.add(task_id, phase1_result.best_library_program)
+                    except:
+                        pass
+                
+                result = TaskResult(task_id, success, library_test_score, phase1_result.best_library_program)
+                if verbose:
+                    status = "✓" if success else "✗"
+                    with print_lock:
+                        print(f"{status} [{idx+1}/{len(tasks_data)}] {task_id}: {library_test_score:.2f} (library-only)", flush=True)
+                return result, -1
+            else:
+                result = TaskResult(task_id, False, 0.0, error="No code generated")
+                if verbose:
+                    with print_lock:
+                        print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (no code)", flush=True)
+                return result, -1
         
-        # Test each of the K samples on training data
+        # Test each of the K samples on testing data
         for k in range(k_samples):
             generated_code = extract_code_from_response(phase2c_results[idx][k])
             
@@ -478,108 +498,98 @@ Combat this by evolving your hypothesis"""
                 continue
             
             try:
-                score, test_results = test_program(generated_code, task, testing='train')
+                score, test_results = test_program(generated_code, task, testing='test', timeout=timeout)
                 all_sample_scores.append((k, score, generated_code, None))
                 
                 if score > best_score:
-                    # Demote current best to second best
-                    second_best_score = best_score
-                    second_best_program = best_program
-                    second_best_sample_idx = best_sample_idx
-                    second_best_hypothesis = best_hypothesis
-                    second_best_validation = best_validation
-                    
-                    # Update best
                     best_score = score
                     best_program = generated_code
                     best_sample_idx = k
                     best_hypothesis = phase2a_results[idx][k]
                     best_validation = phase2b_results[idx][k]
-                elif score > second_best_score:
-                    # Update second best
-                    second_best_score = score
-                    second_best_program = generated_code
-                    second_best_sample_idx = k
-                    second_best_hypothesis = phase2a_results[idx][k]
-                    second_best_validation = phase2b_results[idx][k]
             except Exception as e:
                 all_sample_scores.append((k, 0.0, None, str(e)))
         
-        # Test both candidates on test set
-        best_test_score = 0.0
-        second_best_test_score = 0.0
-        
-        if best_program:
+        # --- REPAIR LOOP (Phase 2D) ---
+        # If best score is not 1.0, try to repair the best candidate
+        if best_score < 1.0 and best_program:
+            if verbose:
+                with print_lock:
+                    print(f"  Attempting repair for {task_id} (current best: {best_score:.2f})...", flush=True)
+            
+            # Construct error message from train results
+            _, test_results = test_program(best_program, task, testing='train', timeout=timeout)
+            error_msg = "Failed on training examples:\n"
+            for i, (expected, actual, success) in enumerate(test_results):
+                if not success:
+                    error_msg += f"Example {i+1}: Output mismatch or error.\n"
+            
+            repair_prompt = prompter.build_phase2d_prompt(task, best_program, error_msg)
+            
+            # Call VLM for repair
             try:
-                best_test_score, _ = test_program(best_program, task, testing='test')
-            except:
-                best_test_score = 0.0
-        
-        if second_best_program:
-            try:
-                second_best_test_score, _ = test_program(second_best_program, task, testing='test')
-            except:
-                second_best_test_score = 0.0
-        
-        # Select the better performing candidate on test set
-        if second_best_test_score > best_test_score:
-            final_score = second_best_test_score
-            final_program = second_best_program
-            final_hypothesis = second_best_hypothesis
-            final_validation = second_best_validation
-            selected_sample_idx = second_best_sample_idx
-            sample_selection_counts[second_best_sample_idx] += 1
-        else:
-            final_score = best_test_score
-            final_program = best_program
-            final_hypothesis = best_hypothesis
-            final_validation = best_validation
-            selected_sample_idx = best_sample_idx
-            if best_score > 0:
-                sample_selection_counts[best_sample_idx] += 1
+                repair_response = vlm_client_phase2.query(repair_prompt, "You are an expert Python programmer fixing code.")
+                repaired_code = extract_code_from_response(repair_response)
+                
+                if repaired_code:
+                    repair_score, _ = test_program(repaired_code, task, testing='test', timeout=timeout)
+                    if repair_score > best_score:
+                        if verbose:
+                            with print_lock:
+                                print(f"  Repair successful! Score: {best_score:.2f} -> {repair_score:.2f}", flush=True)
+                        best_score = repair_score
+                        best_program = repaired_code
+            except Exception as e:
+                if verbose:
+                    with print_lock:
+                        print(f"  Repair failed: {e}", flush=True)
+
+        # Final Selection (based on TESTING score)
+        final_score = best_score
+        final_program = best_program
+        final_hypothesis = best_hypothesis
+        final_validation = best_validation
+        selected_sample_idx = best_sample_idx
         
         # Compare with library fallback
-        if phase1_result.best_library_score > final_score:
-            final_score = phase1_result.best_library_score
-            final_program = phase1_result.best_library_program
-            selected_sample_idx = -1  # Indicate library fallback
+        if phase1_result.best_library_program:
+            # Evaluate library program on TEST set to ensure fair comparison
+            library_test_score, _ = test_program(phase1_result.best_library_program, task, testing='test', timeout=timeout)
+            
+            if library_test_score > final_score:
+                final_score = library_test_score
+                final_program = phase1_result.best_library_program
+                selected_sample_idx = -1  # Indicate library fallback
         
         # Add to library if successful
         success = final_score == 1.0
-        if success and final_program in [best_program, second_best_program]:
+        if success and final_program:
             namespace = globals().copy()
-            exec(final_program, namespace)
-            if 'solve' in namespace:
-                library.add(task_id, final_program)
+            try:
+                exec(final_program, namespace)
+                if 'solve' in namespace:
+                    with library_lock:
+                        library.add(task_id, final_program)
+            except:
+                pass
         
         result = TaskResult(
             task_id, success, final_score, final_program,
             final_hypothesis, final_validation
         )
         
-        if success:
-            successful += 1
-        total_score += final_score
-        
         # Detailed logging
         log_path = os.path.join(log_dir, f"{task_id}_selection_summary.txt")
         with open(log_path, 'w') as f:
             f.write(f"Task ID: {task_id}\n{'='*80}\n")
             f.write(f"K-SAMPLE SELECTION SUMMARY\n{'='*80}\n\n")
-            f.write(f"Sample Scores (train):\n{'-'*80}\n")
+            f.write(f"Sample Scores (test):\n{'-'*80}\n")
             for k, score, code, error in all_sample_scores:
                 status = "✓" if score == 1.0 else "✗"
                 if error:
                     f.write(f"  Sample {k}: {score:.2f} {status} (Error: {error})\n")
                 else:
                     f.write(f"  Sample {k}: {score:.2f} {status}\n")
-            f.write(f"{'-'*80}\n\n")
-            
-            f.write(f"Test Set Performance:\n{'-'*80}\n")
-            if best_program:
-                f.write(f"  Best candidate (sample {best_sample_idx}): train={best_score:.2f}, test={best_test_score:.2f}\n")
-            if second_best_program:
-                f.write(f"  2nd best candidate (sample {second_best_sample_idx}): train={second_best_score:.2f}, test={second_best_test_score:.2f}\n")
             f.write(f"{'-'*80}\n\n")
             
             if selected_sample_idx >= 0:
@@ -593,9 +603,34 @@ Combat this by evolving your hypothesis"""
         if verbose:
             status = "✓" if success else "✗"
             sample_info = f"sample{selected_sample_idx}" if selected_sample_idx >= 0 else "library"
-            print(f"{status} [{idx+1}/{len(tasks_data)}] {task_id}: {final_score:.2f} ({sample_info})", flush=True)
+            with print_lock:
+                print(f"{status} [{idx+1}/{len(tasks_data)}] {task_id}: {final_score:.2f} ({sample_info})", flush=True)
         
-        results.append(result)
+        return result, selected_sample_idx
+
+    # Execute in parallel
+    max_execution_workers = 120
+    with ThreadPoolExecutor(max_workers=max_execution_workers) as executor:
+        task_args = [(idx, task_id, task) for idx, (task_id, task) in enumerate(tasks_data)]
+        future_to_idx = {executor.submit(evaluate_task, args): args[0] for args in task_args}
+        
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                result, selected_sample_idx = future.result()
+                results[idx] = result
+                
+                if result.success:
+                    successful += 1
+                total_score += result.score
+                
+                if selected_sample_idx >= 0:
+                    sample_selection_counts[selected_sample_idx] += 1
+            except Exception as e:
+                print(f"Error processing task {idx}: {e}", flush=True)
+                results[idx] = TaskResult(tasks_data[idx][0], False, 0.0, error=str(e))
+    
+    results = [r for r in results if r is not None]
     
     time_execution = time.time()
     

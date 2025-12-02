@@ -9,26 +9,26 @@ model:
 # VLM Configuration
 vlm_config:
   phase1:
-    max_tokens: 16384
+    max_tokens: 32000
     max_retries: 3
     save_prompts: false
-    prompt_log_dir: "prompts_old_dsl"
+    prompt_log_dir: "prompts_new_dsl"
 
   phase2:
-    max_tokens: 8192
+    max_tokens: 32000
     max_retries: 3
 
 # Process Directory Parameters
 process_directory:
   data_dir: "data_v2/evaluation"
-  timeout: 2
+  timeout: 5
   k_samples: 4
   max_find_similar_workers: 56
-  log_dir: "logs_baseline"
+  log_dir: "logs_baseline_new_dsl_repair_v2"
   verbose: false
   similar: true
   few_shot: true
 
 # Output Configuration
 output:
-  results_dir: "results/baseline"
+  results_dir: "results/baseline_new_dsl_repair_v2"

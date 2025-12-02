@@ -13,25 +13,31 @@ def extract_functions(pattern_text: str) -> Set[str]:
     """
     # All DSL function names
     DSL_FUNCTIONS = {
-        # Transforms
-        'hmirror', 'vmirror', 'dmirror', 'cmirror',
-        'rot90', 'rot180', 'rot270',
-        
-        # Compose
-        'vconcat', 'hconcat', 'crop', 'upscale', 'downscale',
-        
-        # Objects
-        'objects', 'colorfilter', 'sizefilter', 'argmax', 'argmin',
-        
-        # Modify
-        'fill', 'paint', 'replace', 'shift',
-        
-        # Query
-        'size', 'height', 'width', 'shape', 'palette', 'mostcolor',
-        'ulcorner', 'urcorner', 'toindices',
-        
-        # Create
-        'canvas', 'full',
+        'identity', 'add', 'subtract', 'multiply', 'divide', 'double', 'halve', 'is_even', 'negate', 'is_positive',
+        'logical_not', 'logical_and', 'logical_or', 'is_equal', 'greater_than', 'contains', 'union', 'intersection',
+        'difference', 'remove_duplicates', 'sort', 'repeat', 'size', 'maximum', 'minimum', 'valmax', 'valmin',
+        'argmax', 'argmin', 'most_common', 'least_common', 'increment', 'decrement', 'crement', 'sign',
+        'to_vertical_vec', 'to_horizontal_vec', 'initset', 'insert', 'remove', 'get_first', 'get_other', 'get_last',
+        'flatten', 'keep_if_condition', 'keep_if_condition_and_flatten', 'extract_first_matching', 'interval',
+        'to_tuple', 'as_generic_tuple', 'as_tuple', 'make_cell', 'cartesian_product', 'pairwise', 'condition_if_else',
+        'compose', 'chain', 'equals', 'fix_last_argument', 'fix_first_argument', 'power', 'combine_two_function_results',
+        'transform', 'apply_each_function', 'transform_and_flatten', 'transform_both', 'transform_both_and_flatten',
+        'apply_function_on_cartesian_product', 'most_common_color', 'least_common_color', 'get_height', 'get_width',
+        'get_shape', 'is_portrait', 'color_count', 'color_filter', 'as_indices', 'size_filter', 'of_color',
+        'upper_left_corner', 'upper_right_corner', 'lower_left_corner', 'lower_right_corner', 'crop', 'to_indices',
+        'recolor', 'shift_by_vector', 'shift_to_origin', 'direct_neighbors', 'diagonal_neighbors', 'neighbors',
+        'as_objects', 'partition', 'partition_only_foreground', 'uppermost', 'lowermost', 'leftmost', 'rightmost',
+        'is_square', 'is_vertical_line', 'is_horizontal_line', 'horizontal_matching', 'vertical_matching',
+        'manhattan_distance', 'adjacent', 'bordering', 'centerofmass', 'palette', 'count_colors', 'get_color',
+        'to_object', 'as_object', 'rot90', 'rot180', 'rot270', 'horizontal_mirror', 'vertical_mirror',
+        'diagonal_mirror', 'counterdiagonal_mirror', 'fill', 'fill_background', 'paint_onto_grid',
+        'paint_onto_grid_background', 'horizontal_upscale', 'vertical_upscale', 'upscale', 'downscale',
+        'horizontal_concat', 'vertical_concat', 'smallest_subgrid_containing', 'horizontal_split', 'vertical_split',
+        'cellwise', 'replace', 'switch', 'center', 'position', 'color_at_location', 'create_grid', 'corner_indices',
+        'line_between', 'erase_patch', 'trim_border', 'move_object', 'top_half', 'bottom_half', 'left_half',
+        'right_half', 'vertical_line', 'horizontal_line', 'bounding_box_indices', 'bounding_box_delta',
+        'move_until_touching', 'inbox', 'outbox', 'box', 'shoot', 'occurrences', 'solid_color_strips_in_grid',
+        'remove_solid_color_strips_from_grid', 'horizontal_periodicity', 'vertical_periodicity'
     }
     
     # Find which functions appear in the text

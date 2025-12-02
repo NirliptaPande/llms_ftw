@@ -9,11 +9,30 @@ Supports:
 import os
 import time
 import requests
+import threading
 from pathlib import Path
 from typing import Optional, Union, List, Dict, Any
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from abc import ABC, abstractmethod
+
+class RateLimiter:
+    """Simple thread-safe rate limiter"""
+    def __init__(self, max_rpm: int):
+        self.interval = 60.0 / max_rpm
+        self.last_call_time = 0
+        self._lock = threading.Lock()
+
+    def wait(self):
+        with self._lock:
+            now = time.time()
+            elapsed = now - self.last_call_time
+            wait_time = self.interval - elapsed
+            if wait_time > 0:
+                time.sleep(wait_time)
+                self.last_call_time = time.time()
+            else:
+                self.last_call_time = now
 
 @dataclass
 class VLMConfig:
@@ -21,14 +40,15 @@ class VLMConfig:
     api_key: Optional[str] = None
     model: str = "grok-4-fast"
     api_base: str = "https://api.x.ai/v1"
-    max_tokens: int = 4096
+    max_tokens: int = 32096
     temperature: float = 0.7
-    timeout: int = 240
+    timeout: int = 480
     max_retries: int = 1
     retry_delay: float = 60.0
     save_prompts: bool = False
     prompt_log_dir: str = "prompts"
     suppress_errors: bool = False  # Return empty string on errors instead of raising
+    max_rpm: int = 450
 
 class BaseVLMClient(ABC):
     """Base class for VLM clients"""
@@ -38,6 +58,8 @@ class BaseVLMClient(ABC):
         self.session = requests.Session()
         self._setup_session()
         self.prompt_counter = 0
+        self._lock = threading.Lock()
+        self.rate_limiter = RateLimiter(config.max_rpm)
     
     @abstractmethod
     def _setup_session(self):
@@ -63,8 +85,11 @@ class BaseVLMClient(ABC):
         log_dir = Path(self.config.prompt_log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         
-        self.prompt_counter += 1
-        filename = f"{prompt_type}_{self.prompt_counter:03d}.html"
+        with self._lock:
+            self.prompt_counter += 1
+            current_counter = self.prompt_counter
+            
+        filename = f"{prompt_type}_{current_counter:03d}.html"
         filepath = log_dir / filename
         
         # Build HTML
@@ -73,7 +98,7 @@ class BaseVLMClient(ABC):
         html_parts.append('.message{border:1px solid #ccc;margin:10px 0;padding:10px;} ')
         html_parts.append('.role{font-weight:bold;color:#0066cc;} ')
         html_parts.append('img{max-width:600px;margin:10px 0;border:1px solid #eee;}</style></head><body>')
-        html_parts.append(f'<h2>Prompt Log #{self.prompt_counter}</h2>')
+        html_parts.append(f'<h2>Prompt Log #{current_counter}</h2>')
         
         # Extract messages from payload
         messages = payload.get('messages', [])
@@ -118,6 +143,7 @@ class BaseVLMClient(ABC):
         Returns:
             Response text from the model (or empty string if suppress_errors=True and error occurs)
         """
+        self.rate_limiter.wait()
         try:
             payload = self._build_payload(prompt, system_prompt)
             # self._save_prompt_html(payload, prompt_type=f"{self.config.model}")

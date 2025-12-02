@@ -230,8 +230,8 @@ print(f"\n✅ Solved {solved}/{len(results)} tasks")
 <final_pattern>
 SIZE: (h,w) → (2h,w)
 OPS:
-x1 = hmirror(I)
-O = vconcat(I, x1)
+x1 = horizontal_mirror(I)
+O = vertical_concat(I, x1)
 LOGIC: stack horizontally mirrored version below original
 CONDITIONS: none
 </final_pattern>
@@ -260,10 +260,10 @@ CONDITIONS: none
 ```python
 def solve(I):
     # Mirror horizontally
-    x1 = hmirror(I)
+    x1 = horizontal_mirror(I)
     
     # Stack vertically
-    O = vconcat(I, x1)
+    O = vertical_concat(I, x1)
     
     return O
 ```
@@ -374,24 +374,24 @@ export GROK_API_KEY=your_key_here
 
 ```python
 # Transforms
-hmirror(grid)          # horizontal flip
-vmirror(grid)          # vertical flip
-rot90/180/270(grid)    # rotations
+horizontal_mirror(grid)          # horizontal flip
+vertical_mirror(grid)            # vertical flip
+rot90/180/270(grid)              # rotations
 
 # Composition
-vconcat(a, b)          # stack vertically
-hconcat(a, b)          # stack horizontally
+vertical_concat(a, b)            # stack vertically
+horizontal_concat(a, b)          # stack horizontally
 
 # Objects
-objects(grid, T, F, T) # find connected regions
-colorfilter(objs, c)   # filter by color
-argmax(objs, size)     # largest object
+as_objects(grid, T, F, T)        # find connected regions
+color_filter(objs, c)            # filter by color
+argmax(objs, size)               # largest object
 
 # Functional
-compose(f, g)          # f(g(x))
-chain(f, g, h)         # f(g(h(x)))
-fork(combine, f, g)    # combine(f(x), g(x))
-rbind(func, arg)       # partial application
+compose(f, g)                    # f(g(x))
+chain(f, g, h)                   # f(g(h(x)))
+combine_two_function_results(combine, f, g)    # combine(f(x), g(x))
+fix_last_argument(func, arg)     # partial application
 ```
 
 Full reference in `dsl.py` (100+ functions)

@@ -1,34 +1,43 @@
+exp_name: "testing"
 # Model Provider Configuration
 provider: "grok"  # Options: "grok", "qwen", "gemini"
 
 # Model Configuration
 model:
-  name: "grok-4-fast"
-  api_base: "https://api.x.ai/v1"
+  name: "x-ai/grok-4-fast"
+  api_base: "https://openrouter.ai/api/v1"
 
 # VLM Configuration
 vlm_config:
   phase1:
-    max_tokens: 16384
+    max_tokens: 32000
     max_retries: 3
     save_prompts: false
     prompt_log_dir: "prompts_old_dsl"
+    extra_params:
+      reasoning:
+        enabled: true
 
   phase2:
-    max_tokens: 8192
+    max_tokens: 32000
     max_retries: 3
+    extra_params:
+      reasoning:
+        enabled: true
 
 # Process Directory Parameters
 process_directory:
-  data_dir: "data_v2/evaluation"
-  timeout: 2
+  data_dir: "data_v1/eval_size_10"
+  timeout: 5
   k_samples: 4
   max_find_similar_workers: 56
-  log_dir: "logs_baseline"
-  verbose: false
+  log_dir: "testing"
+  verbose: true
   similar: true
   few_shot: true
+  dsl_enabled: true
 
 # Output Configuration
 output:
-  results_dir: "results/baseline"
+  results_dir: "results/testing"
+#Without images, With program refinement, switch to openrouter, core concepts as language, core concepts of this solution as library,  

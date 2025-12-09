@@ -29,6 +29,8 @@ class VLMConfig:
     save_prompts: bool = False
     prompt_log_dir: str = "prompts"
     suppress_errors: bool = False  # Return empty string on errors instead of raising
+    max_rpm: int = 450
+    extra_params: Optional[Dict[str, Any]] = None
 
 class BaseVLMClient(ABC):
     """Base class for VLM clients"""
@@ -105,7 +107,7 @@ class BaseVLMClient(ABC):
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write('\n'.join(html_parts))
         
-        print(f"📝 Saved prompt to: {filepath}")
+        print(f"g Saved prompt to: {filepath}")
         
     def query(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str] = None) -> str:
         """
@@ -178,18 +180,46 @@ class OpenAICompatibleClient(BaseVLMClient):
             headers['Authorization'] = f'Bearer {self.config.api_key}'
         self.session.headers.update(headers)
 
+    # def _build_payload(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str]) -> dict:
+    #     messages = []
+    #     if system_prompt:
+    #         messages.append({'role': 'system', 'content': system_prompt})
+    #     messages.append({'role': 'user', 'content': prompt})
+
+    #     payload = {
+    #         'model': self.config.model,
+    #         'messages': messages,
+    #         'max_tokens': self.config.max_tokens,
+    #         'temperature': self.config.temperature
+    #     }
+    #     if self.config.extra_params:
+    #         payload.update(self.config.extra_params)
+            
+    #     return payload
     def _build_payload(self, prompt: Union[str, List[Dict[str, Any]]], system_prompt: Optional[str]) -> dict:
+        reasoning_enabled = (self.config.extra_params is not None and self.config.extra_params.get('reasoning', {}).get('enabled', False))
         messages = []
-        if system_prompt:
+
+        if reasoning_enabled and system_prompt:
+            if isinstance(prompt, str):
+                prompt = f"{system_prompt}\n\n{prompt}"
+            elif isinstance(prompt, list):
+                prompt = prompt.copy()
+                prompt.insert(0, {'type': 'text', 'text': system_prompt})
+        
+        elif system_prompt:
             messages.append({'role': 'system', 'content': system_prompt})
         messages.append({'role': 'user', 'content': prompt})
-
-        return {
+        payload = {
             'model': self.config.model,
             'messages': messages,
             'max_tokens': self.config.max_tokens,
             'temperature': self.config.temperature
         }
+        if self.config.extra_params:
+            payload.update(self.config.extra_params)
+        return payload
+    
 
     def _extract_response(self, data: dict) -> str:
         if 'choices' in data and len(data['choices']) > 0:
@@ -309,7 +339,7 @@ def create_client(provider: str = "grok", config: Optional[VLMConfig] = None) ->
                 config = VLMConfig(
                     api_key=api_key,
                     model="grok-4-fast",
-                    api_base="https://api.x.ai/v1"
+                    api_base="https://openrouter.ai/api/v1"
                 )
             elif provider == "qwen":
                 config = VLMConfig(

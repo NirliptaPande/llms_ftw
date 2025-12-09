@@ -15,3 +15,5 @@ src/results
 /test_1
 diff.txt
 /baseline
+/testing*
+/wandb/*

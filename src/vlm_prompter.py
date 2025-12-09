@@ -1,8 +1,3 @@
-"""
-Refactored VLM Prompter for ARC DSL-based solver with image support.
-New pipeline: Program Similarity → Pattern Discovery (2 phases) → Code Generation
-"""
-
 from typing import List, Tuple, Dict, Any
 import numpy as np
 from utils.render_legacy import grid_to_base64_png_oai_content
@@ -12,24 +7,15 @@ class VLMPrompter:
     """Builds prompts for the program-first ARC solving process"""
     
     def __init__(self):
-        self.phase2a_template = self._load_phase2a_template()
+        # Don't cache templates that depend on dsl_enabled
         self.phase2b_template = self._load_phase2b_template()
-        self.phase2c_dsl_section = self._get_phase2c_dsl_section()
-        self.few_shot_examples = self._get_phase2c_fewshot_section()
     
     def build_phase2a_prompt(self, 
                              task: Dict[str, Any],
-                             similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+                             similar_programs: List[Dict[str, Any]] = None,
+                             dsl_enabled: bool = True) -> List[Dict[str, Any]]:
         """
         Build Phase 2A prompt: Hypothesis Formation from Training Only.
-        
-        Args:
-            task: Dict with 'train' key containing list of {'input': grid, 'output': grid}
-            similar_programs: List of similar programs from library (found via execution)
-                             Each dict has: {'program': str, 'similarity': float, 'task_id': str}
-            
-        Returns:
-            List of content blocks (dicts) for multimodal prompt
         """
         content_blocks = []
         
@@ -41,27 +27,31 @@ class VLMPrompter:
         
         # Format training examples ONLY (with images)
         content_blocks.extend(self._format_training_examples(task['train']))
+
+        if dsl_enabled:  
+            # Add similar programs section
+            content_blocks.append({
+                "type": "text",
+                "text": "\n## Similar Programs for Reference.\nThe following programs solved similar tasks and may provide useful patterns or approaches:\n"
+            })
+      
+            if similar_programs:
+                similar_str = self._format_similar_programs(similar_programs)
+            else:
+                similar_str = "[No similar programs found]"
+            
+            content_blocks.append({
+                "type": "text",
+                "text": similar_str
+            })
         
-        # Add similar programs section
-        content_blocks.append({
-            "type": "text",
-            "text": "\n## Similar Programs from Library\n"
-        })
-        
-        if similar_programs:
-            similar_str = self._format_similar_programs(similar_programs)
-        else:
-            similar_str = "[No similar programs found in library]"
-        
-        content_blocks.append({
-            "type": "text",
-            "text": similar_str
-        })
+        # Get template with dsl_enabled parameter
+        template = self._load_phase2a_template(dsl_enabled)
         
         # Add the analysis protocol template (hypothesis formation)
         content_blocks.append({
             "type": "text",
-            "text": self.phase2a_template
+            "text": template
         })
         
         return content_blocks
@@ -69,17 +59,10 @@ class VLMPrompter:
     def build_phase2b_prompt(self,
                              task: Dict[str, Any],
                              hypothesis: str,
-                             similar_programs: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+                             similar_programs: List[Dict[str, Any]] = None,
+                             dsl_enabled: bool = True) -> List[Dict[str, Any]]:
         """
         Build Phase 2B prompt: Hypothesis Validation with Training + Test.
-        
-        Args:
-            task: Dict with 'train' and 'test' keys
-            hypothesis: The hypothesis from Phase 2A
-            similar_programs: List of similar programs from library
-            
-        Returns:
-            List of content blocks for multimodal prompt
         """
         content_blocks = []
         
@@ -112,7 +95,21 @@ If it doesn't fit perfectly, identify what needs to be refined.
         })
         content_blocks.extend(self._format_training_examples(task['train'], include_images=True))
         
-
+        if dsl_enabled:
+            content_blocks.append({
+                "type": "text",
+                "text": "\n## Similar Programs for Reference\n"
+            })
+            
+            if similar_programs:
+                similar_str = self._format_similar_programs(similar_programs)
+            else:
+                similar_str = "[No similar programs found]"
+                
+            content_blocks.append({
+                "type": "text",
+                "text": similar_str
+            })
         
         # Add validation template
         content_blocks.append({
@@ -126,28 +123,26 @@ If it doesn't fit perfectly, identify what needs to be refined.
                              task: Dict[str, Any], 
                              validated_pattern: str,
                              similar_programs: List[Dict[str, Any]] = None,
-                             few_shot: bool = True ) -> List[Dict[str, Any]]:
+                             few_shot: bool = True,
+                             dsl_enabled: bool = True) -> List[Dict[str, Any]]:
         """
         Build Phase 2C prompt: Code Generation from Validated Pattern.
-        This matches the original build_phase2_prompt structure exactly.
-        
-        Args:
-            task: Dict with 'train' and 'test' keys
-            validated_pattern: The validated pattern description from Phase 2B
-            similar_programs: Same list of similar programs (for reference during coding)
-            
-        Returns:
-            List of content blocks (dicts) for multimodal prompt
         """
         content_blocks = []
         
-        # Add header (same as original)
-        content_blocks.append({
-            "type": "text",
-            "text": "# DSL Code Generator\nGenerate a Python `solve(I)` function using ONLY the DSL primitives below.\n\n"
-        })
+        # Add header
+        if dsl_enabled:
+            content_blocks.append({
+                "type": "text",
+                "text": "# DSL Code Generator\nGenerate a Python `solve(I)` function using ONLY the DSL primitives below.\n\n"
+            })
+        else:
+            content_blocks.append({
+                "type": "text",
+                "text": "# Python Code Generator\nGenerate a Python `solve(I)` function.\n\n"
+            })
         
-        # Add training examples section (same as original)
+        # Add training examples section
         content_blocks.append({
             "type": "text",
             "text": "## Training Examples\n"
@@ -159,37 +154,40 @@ If it doesn't fit perfectly, identify what needs to be refined.
         # Format test examples (input only, no output)
         content_blocks.extend(self._format_test_examples(task['test'], include_images=True))
         
-        # Add pattern description (using validated pattern instead of extracting from phase1)
+        # Add pattern description
         content_blocks.append({
             "type": "text",
             "text": f"\n## Natural Language Pattern Description\n{validated_pattern}\n"
         })
         
-        # Add similar programs section (same as original)
-        content_blocks.append({
-            "type": "text",
-            "text": "\n## Similar Programs for Reference\nThe following programs solved similar tasks and may provide useful patterns or approaches:\n\n"
-        })
-        
-        if similar_programs:
-            similar_str = self._format_similar_programs(similar_programs)
-        else:
-            similar_str = "[No similar programs available for reference]"
-        
-        content_blocks.append({
-            "type": "text",
-            "text": similar_str
-        })
-        
-        # Add DSL primitives and the rest of the template (same as original)
-        content_blocks.append({
-            "type": "text",
-            "text": self.phase2c_dsl_section
-        })
-        if few_shot:
+        if dsl_enabled:
+            # Add similar programs section
             content_blocks.append({
                 "type": "text",
-                "text": self.few_shot_examples
+                "text": "\n## Similar Programs for Reference\nThe following programs solved similar tasks and may provide useful patterns or approaches:\n\n"
+            })
+            
+            if similar_programs:
+                similar_str = self._format_similar_programs(similar_programs)
+            else:
+                similar_str = "[No similar programs available for reference]"
+            
+            content_blocks.append({
+                "type": "text",
+                "text": similar_str
+            })
+        
+        # Add DSL primitives or Python instructions (dynamically generated)
+        content_blocks.append({
+            "type": "text",
+            "text": self._get_phase2c_dsl_section(dsl_enabled)
+        })
+        
+        # Add few-shot examples only if DSL is enabled
+        if few_shot and dsl_enabled:
+            content_blocks.append({
+                "type": "text",
+                "text": self._get_phase2c_fewshot_section()
             })
             
         content_blocks.append({
@@ -318,17 +316,19 @@ If it doesn't fit perfectly, identify what needs to be refined.
         
         return "\n".join(lines)
     
-    def _load_phase2a_template(self) -> str:
+    def _load_phase2a_template(self, dsl_enabled: bool = True) -> str:
         """Template for hypothesis formation (training only)"""
-        return r"""
-## Analysis Protocol
-
-You will analyze the examples systematically, allowing your hypothesis to evolve naturally as you see more data - like a human solving a puzzle.
+        
+        if dsl_enabled:
+            intro = "\n## Analysis Protocol\n\nThe similar programs shown above may provide useful patterns, but focus primarily on understanding the transformation through the training examples.\n\n"
+        else:
+            intro = "\n## Analysis Protocol\n\n"
+        
+        body = """You will analyze the examples systematically, allowing your hypothesis to evolve naturally as you see more data - like a human solving a puzzle.
 
 **Core principle:** Look for DIFFERENCES within each example (input→output changes) and SIMILARITIES across all examples (the consistent pattern).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 Work through examples sequentially, reasoning in simple English about what you observe.
 
 **Step 1: First Example Analysis**
@@ -398,12 +398,13 @@ Confidence level: [0-100%]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Begin your analysis:"""
-    
+        
+        return intro + body
+
     def _load_phase2b_template(self) -> str:
         """Template for hypothesis validation (all examples)"""
         return r"""
 ## Validation Protocol
-
 Check if the initial hypothesis fits ALL examples (training + test inputs).
 Your goal: Confirm the hypothesis or refine it as needed.
 
@@ -434,9 +435,10 @@ After checking all examples:
 
 Begin validation:"""
     
-    def _get_phase2c_dsl_section(self) -> str:
-        """Phase 2C: DSL Primitives and Code Generation Instructions (EXACT copy from original)"""
-        return """
+    def _get_phase2c_dsl_section(self, dsl_enabled: bool = True) -> str:
+        """Phase 2C: DSL Primitives and Code Generation Instructions"""
+        if dsl_enabled:
+            return """
 ## DSL Primitives
 
 **Type Definitions:**
@@ -652,8 +654,57 @@ def solve(I):
     # [final step]
     return O # O is the output grid
 ```
-
 """
+        else:
+            return """
+## Requirements
+- Function signature: `def solve(I):`
+- Input `I` is `Tuple[Tuple[int, ...], ...]` - Immutable 2D array (tuple of tuples)
+- Return same format: tuple of tuples of int
+- Write the solution in **pure Python** using standard libraries
+- You can use: numpy, itertools, collections, or any standard Python constructs
+- Add clear comments explaining your logic
+- Use any functions, loops, and data structures you need
+
+## Approach
+Think about the transformation step-by-step:
+1. Analyze the input grid structure
+2. Identify the pattern/transformation rule
+3. Implement the logic to apply this transformation
+4. Return the output grid in the same tuple-of-tuples format
+
+## Output Format
+```python
+def solve(I):
+    # Convert to working format if needed
+    # (e.g., list of lists, numpy array, etc.)
+    
+    # [Your transformation logic here]
+    # Use clear variable names and comments
+    
+    # Convert back to tuple of tuples
+    O = tuple(tuple(row) for row in result)
+    return O
+```
+
+**Example Structure:**
+```python
+def solve(I):
+    # Convert input to mutable format
+    grid = [list(row) for row in I]
+    height, width = len(grid), len(grid[0])
+    
+    # Apply transformation logic
+    for i in range(height):
+        for j in range(width):
+            # Your logic here
+            pass
+    
+    # Return as tuple of tuples
+    return tuple(tuple(row) for row in grid)
+```
+"""
+        
     def _get_phase2c_fewshot_section(self) -> str:
         """Few-shot examples for Phase 2C (if needed)"""
         return r"""

@@ -192,6 +192,29 @@ def extract_validated_pattern_from_response(response: str) -> str:
     
     return response.strip()
 
+def sort_examples_by_size(task: Dict) -> Dict:
+    """Sort training and test examples by grid size (smallest first)."""
+    def grid_size(grid):
+        """Calculate grid size (height * width)"""
+        if isinstance(grid, (list, tuple)) and len(grid) > 0:
+            return len(grid) * len(grid[0]) if len(grid[0]) > 0 else 0
+        return 0
+    
+    def example_size(example):
+        """Get max size of input and output grids"""
+        input_size = grid_size(example['input'])
+        output_size = grid_size(example['output'])
+        return max(input_size, output_size)
+    
+    # Sort train examples
+    if 'train' in task:
+        task['train'] = sorted(task['train'], key=example_size)
+    
+    # Sort test examples
+    if 'test' in task:
+        task['test'] = sorted(task['test'], key=example_size)
+    
+    return task
 
 def process_directory(
     data_dir: str,
@@ -205,13 +228,14 @@ def process_directory(
     log_dir: str = "logs",
     verbose: bool = True,
     similar: bool = True,
-    few_shot: bool = True
+    few_shot: bool = True,
+    dsl_enabled: bool = True
 ) -> List[TaskResult]:
     """
     Process all tasks with fully batched API calls and K-sample diversity.
     
     Strategy:
-    1. Run find_similar in parallel for all tasks
+    1. Run find_similar in parallel for all tasks (only if dsl_enabled)
     2. For each task, generate K samples:
        - Batch ALL phase2a prompts (K per task) → send in parallel
        - Batch ALL phase2b prompts (K per task) → send in parallel
@@ -233,7 +257,8 @@ def process_directory(
     
     if verbose:
         print(f"\n{'='*80}", flush=True)
-        print(f"K-SAMPLE BATCHED PIPELINE - {k_samples} SAMPLES PER TASK", flush=True)
+        mode = "DSL" if dsl_enabled else "Pure Python"
+        print(f"K-SAMPLE BATCHED PIPELINE ({mode}) - {k_samples} SAMPLES PER TASK", flush=True)
         print(f"{'='*80}", flush=True)
         print(f"Total tasks: {len(json_files)}", flush=True)
         print(f"Total API calls per phase: {len(json_files)} × {k_samples}", flush=True)
@@ -246,6 +271,7 @@ def process_directory(
         try:
             with open(task_file, 'r') as f:
                 task = json.load(f)
+            task = sort_examples_by_size(task)
             tasks_data.append((task_id, task))
         except Exception as e:
             print(f"✗ {task_id}: {e}", flush=True)
@@ -256,20 +282,27 @@ def process_directory(
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     
     # ========================================================================
-    # PHASE 1: Find similar (parallel)
+    # PHASE 1: Find similar (parallel) - ONLY IF DSL ENABLED
     # ========================================================================
-    if verbose:
-        print(f"Phase 1: Finding similar programs...", flush=True)
-    
-    time_start = time.time()
     phase1_results = [None] * len(tasks_data)
-
-    for idx, (task_id, task) in enumerate(tasks_data):
-        result = phase1_find_similar(task, task_id, library, timeout, verbose, similar)
-        phase1_results[idx] = result
     
-    time_phase1 = time.time()
-    print(f"Phase 1 complete: {time_phase1 - time_start:.1f}s\n", flush=True)
+    if dsl_enabled:
+        if verbose:
+            print(f"Phase 1: Finding similar programs...", flush=True)
+        
+        time_start = time.time()
+        
+        for idx, (task_id, task) in enumerate(tasks_data):
+            result = phase1_find_similar(task, task_id, library, timeout, verbose, similar)
+            phase1_results[idx] = result
+        
+        time_phase1 = time.time()
+        print(f"Phase 1 complete: {time_phase1 - time_start:.1f}s\n", flush=True)
+    else:
+        if verbose:
+            print(f"Phase 1: Skipped (DSL disabled)\n", flush=True)
+        time_start = time.time()
+        time_phase1 = time_start
     
     # ========================================================================
     # PHASE 2A: Batch all prompts (K samples per task)
@@ -284,24 +317,33 @@ def process_directory(
     # Initialize 2D results structure
     phase2a_results = [[None] * k_samples for _ in range(len(tasks_data))]
     
-    for idx, (phase1_result, (task_id, task)) in enumerate(zip(phase1_results, tasks_data)):
-        if phase1_result.perfect_match_found or phase1_result.error:
+    for idx, (task_id, task) in enumerate(tasks_data):
+        phase1_result = phase1_results[idx]
+        
+        # Skip if DSL enabled and we found perfect match or error
+        if dsl_enabled and phase1_result and (phase1_result.perfect_match_found or phase1_result.error):
             continue
         
         phase2a_indices.append(idx)
         
-        # Create K copies of the prompt for diversity
         for k in range(k_samples):
-            prompt = prompter.build_phase2a_prompt(task, phase1_result.similar_programs)
+            similar_progs = phase1_result.similar_programs if (dsl_enabled and phase1_result) else None
+            prompt = prompter.build_phase2a_prompt(task, similar_progs, dsl_enabled=dsl_enabled)
             phase2a_prompts.append(prompt)
             phase2a_task_sample_pairs.append((idx, k))
-    
+                
     if verbose:
         print(f"Sending {len(phase2a_prompts)} prompts to API...", flush=True)
     
     phase2a_outputs = []
     if phase2a_prompts:
-        system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. Remember the puzzles are not very complex and usually involve simple sequential transformations.
+        if dsl_enabled:
+            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. Remember the puzzles are not very complex and usually involve simple under 10 sequential transformations. You are given several training examples of input-output pairs for a puzzle followed by a few similar examples along with similarity scores that might be useful as reference. This is followed by a reasoning process where you iteratively refine your hypothesis about the transformation pattern. Finally, you output your best hypothesis in a concise manner. 
+            
+Remember: Your first hypothesis is sticky and excessively convincing to you.
+Combat this by evolving your hypothesis as you see each training example."""
+        else:
+            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. Remember the puzzles are not very complex and usually involve simple under 10 sequential transformations. You are given several training examples of input-output pairs for a puzzle. This is followed by a reasoning process where you iteratively refine your hypothesis about the transformation pattern. Finally, you output your best hypothesis in a concise manner. 
             
 Remember: Your first hypothesis is sticky and excessively convincing to you.
 Combat this by evolving your hypothesis as you see each training example."""
@@ -342,7 +384,8 @@ Combat this by evolving your hypothesis as you see each training example."""
         
         for k in range(k_samples):
             hypothesis = extract_hypothesis_from_response(phase2a_results[idx][k])
-            prompt = prompter.build_phase2b_prompt(task, hypothesis, phase1_result.similar_programs)
+            similar_progs = phase1_result.similar_programs if (dsl_enabled and phase1_result) else None
+            prompt = prompter.build_phase2b_prompt(task, hypothesis, similar_progs, dsl_enabled=dsl_enabled)
             phase2b_prompts.append(prompt)
             phase2b_task_sample_pairs.append((idx, k))
     
@@ -351,11 +394,18 @@ Combat this by evolving your hypothesis as you see each training example."""
     
     phase2b_outputs = []
     if phase2b_prompts:
-        system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns.
+        if dsl_enabled:
+            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns.
 
-You are given an initial hypothesis about the puzzle. If the hypothesis doesn't extend to the test input while explaining the training examples, refine it to create a more accurate pattern description.
-Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple transformation that applies to all samples, both training and test.
-Combat this by evolving your hypothesis"""
+You are given an initial hypothesis and the test input and training input-output pairs from the puzzle. You must now ensure that it generalizes to the test inputs as well as the training examples. Additionally, you are also given a few programs with similarity scores that you might find useful for reference.
+Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple sequential transformation that applies to all samples, both training and test.
+Combat this by evolving your hypothesis."""
+        else:
+            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns.
+
+You are given an initial hypothesis and the test input and training input-output pairs from the puzzle. You must now ensure that it generalizes to the test inputs as well as the training examples.
+Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple sequential transformation that applies to all samples, both training and test.
+Combat this by evolving your hypothesis."""
         
         with ThreadPoolExecutor(max_workers=len(phase2b_prompts)) as executor:
             futures = [executor.submit(vlm_client_phase1.query, p, system_prompt) for p in phase2b_prompts]
@@ -395,7 +445,14 @@ Combat this by evolving your hypothesis"""
         
         for k in range(k_samples):
             validated_pattern = extract_validated_pattern_from_response(phase2b_results[idx][k])
-            prompt = prompter.build_phase2c_prompt(task, validated_pattern, phase1_result.similar_programs, few_shot=few_shot)
+            similar_progs = phase1_result.similar_programs if (dsl_enabled and phase1_result) else None
+            prompt = prompter.build_phase2c_prompt(
+                task, 
+                validated_pattern, 
+                similar_progs, 
+                few_shot=few_shot,
+                dsl_enabled=dsl_enabled
+            )
             phase2c_prompts.append(prompt)
             phase2c_task_sample_pairs.append((idx, k))
     
@@ -404,7 +461,10 @@ Combat this by evolving your hypothesis"""
     
     phase2c_outputs = []
     if phase2c_prompts:
-        system_prompt = "You are an expert at generating code using the given DSL primitives to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training and test examples and some similar programs you might find useful as reference. Generate a Python function `def solve(I):` that implements the described transformation using ONLY the provided DSL primitives. Ensure your code is syntactically correct and follows best practices"
+        if dsl_enabled:
+            system_prompt = """You are an expert at generating code using the given DSL primitives to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training and test examples and some similar programs you might find useful as reference. Generate a Python function `def solve(I):` that implements the described transformation using ONLY the provided DSL primitives. Ensure your code is syntactically correct and follows best practices."""
+        else:
+            system_prompt = """You are an expert at generating Python code to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training and test examples. Generate a Python function `def solve(I):` that implements the described transformation using pure Python and standard libraries. Ensure your code is syntactically correct and follows best practices."""
         
         with ThreadPoolExecutor(max_workers=len(phase2c_prompts)) as executor:
             futures = [executor.submit(vlm_client_phase2.query, p, system_prompt) for p in phase2c_prompts]
@@ -431,23 +491,23 @@ Combat this by evolving your hypothesis"""
     for idx, (task_id, task) in enumerate(tasks_data):
         phase1_result = phase1_results[idx]
         
-        # Handle perfect match
-        if phase1_result.perfect_match_found:
-            result = TaskResult(task_id, True, 1.0, phase1_result.best_library_program)
-            results.append(result)
-            successful += 1
-            total_score += 1.0
-            if verbose:
-                print(f"✓ [{idx+1}/{len(tasks_data)}] {task_id}: 1.00 (library)", flush=True)
-            continue
+        # # Handle perfect match (only possible if DSL enabled)
+        # if dsl_enabled and phase1_result and phase1_result.perfect_match_found:
+        #     result = TaskResult(task_id, True, 1.0, phase1_result.best_library_program)
+        #     results.append(result)
+        #     successful += 1
+        #     total_score += 1.0
+        #     if verbose:
+        #         print(f"✓ [{idx+1}/{len(tasks_data)}] {task_id}: 1.00 (library)", flush=True)
+        #     continue
         
-        # Handle phase1 errors
-        if phase1_result.error:
-            result = TaskResult(task_id, False, 0.0, error=f"Phase 1: {phase1_result.error}")
-            results.append(result)
-            if verbose:
-                print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (error)", flush=True)
-            continue
+        # # Handle phase1 errors (only possible if DSL enabled)
+        # if dsl_enabled and phase1_result and phase1_result.error:
+        #     result = TaskResult(task_id, False, 0.0, error=f"Phase 1: {phase1_result.error}")
+        #     results.append(result)
+        #     if verbose:
+        #         print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (error)", flush=True)
+        #     continue
         
         # Test all K samples and select best
         best_score = 0.0
@@ -538,15 +598,15 @@ Combat this by evolving your hypothesis"""
             if best_score > 0:
                 sample_selection_counts[best_sample_idx] += 1
         
-        # Compare with library fallback
-        if phase1_result.best_library_score > final_score:
+        # Compare with library fallback (only if DSL enabled)
+        if dsl_enabled and phase1_result and phase1_result.best_library_score > final_score:
             final_score = phase1_result.best_library_score
             final_program = phase1_result.best_library_program
             selected_sample_idx = -1  # Indicate library fallback
         
-        # Add to library if successful
+        # Add to library if successful (only if DSL enabled)
         success = final_score == 1.0
-        if success and final_program in [best_program, second_best_program]:
+        if dsl_enabled and success and final_program in [best_program, second_best_program]:
             namespace = globals().copy()
             exec(final_program, namespace)
             if 'solve' in namespace:
@@ -603,7 +663,8 @@ Combat this by evolving your hypothesis"""
     print(f"\n{'='*80}", flush=True)
     print(f"TIME BREAKDOWN", flush=True)
     print(f"{'='*80}", flush=True)
-    print(f"Phase 1 (find_similar): {time_phase1 - time_start:.1f}s", flush=True)
+    if dsl_enabled:
+        print(f"Phase 1 (find_similar): {time_phase1 - time_start:.1f}s", flush=True)
     print(f"Phase 2A (hypothesis × {k_samples}): {time_phase2a - time_phase1:.1f}s", flush=True)
     print(f"Phase 2B (validation × {k_samples}): {time_phase2b - time_phase2a:.1f}s", flush=True)
     print(f"Phase 2C (code gen × {k_samples}): {time_phase2c - time_phase2b:.1f}s", flush=True)
@@ -623,7 +684,6 @@ Combat this by evolving your hypothesis"""
     print(f"{'='*80}\n", flush=True)
 
     return results
-
 def save_results(results: List[TaskResult], output_dir: str = 'results') -> None:
     """Save results to JSON and CSV files."""
     import csv
@@ -671,13 +731,38 @@ def load_config(config_path: str = None) -> dict:
 
     return config
 
+def build_run_name(config):
+    """Build descriptive run name from config"""
+    model = config['model']['name'].split('/')[-1].replace('-', '')  # "grok4fast"
+    reasoning = "reasoning" if config['vlm_config']['phase1'].get('extra_params', {}).get('reasoning', {}).get('enabled', False) else "noreasoning"
+    dsl = "dsl" if config['process_directory']['dsl_enabled'] else "nodsl"
+    k = f"k{config['process_directory']['k_samples']}"
+    
+    return f"{model}_{reasoning}_{dsl}_{k}"
 
 def main():
+    import wandb
+    import argparse
     from dotenv import load_dotenv
     load_dotenv()
-
-    # Load configuration from YAML
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--exp-name', type=str, help='Experiment name (optional)')
+    args = parser.parse_args()
     config = load_config()
+    #Provided name or use fallback
+    if args.exp_name:
+        exp_name = args.exp_name
+    elif 'exp_name' in config and config['exp_name']:
+        exp_name = config['exp_name']
+    else:
+        exp_name = build_run_name(config)
+
+    wandb.init(
+    project="arc-solver_icml", 
+    name=exp_name,
+    config=config
+)
 
     PROVIDER = config['provider']
 
@@ -687,7 +772,7 @@ def main():
 
     # Get API key from environment based on provider
     if PROVIDER == "grok":
-        api_key = os.getenv('GROK_API_KEY')
+        api_key = os.getenv('OPENROUTER_API_KEY')
     elif PROVIDER == "qwen":
         api_key = None
     elif PROVIDER == "gemini":
@@ -705,6 +790,7 @@ def main():
         max_retries=vlm_phase1_config['max_retries'],
         save_prompts=vlm_phase1_config['save_prompts'],
         prompt_log_dir=vlm_phase1_config['prompt_log_dir'],
+        extra_params=vlm_phase1_config.get('extra_params'),
         suppress_errors=True  # Return empty string on errors for parallel API calls
     )
     vlm_config_phase2 = VLMConfig(
@@ -713,6 +799,7 @@ def main():
         max_retries=vlm_phase2_config['max_retries'],
         api_base=api_base,
         max_tokens=vlm_phase2_config['max_tokens'],
+        extra_params=vlm_phase2_config.get('extra_params'),
         suppress_errors=True  # Return empty string on errors for parallel API calls
     )
 
@@ -723,7 +810,7 @@ def main():
 
     # Get process_directory parameters from config file
     process_params = config['process_directory']
-
+    log_dir = f"logs/{exp_name}"
     results = process_directory(
         data_dir=process_params['data_dir'],
         vlm_client_phase1=vlm_client_phase1,
@@ -733,15 +820,27 @@ def main():
         timeout=process_params['timeout'],
         k_samples=process_params['k_samples'],
         max_find_similar_workers=process_params['max_find_similar_workers'],
-        log_dir=process_params['log_dir'],
+        log_dir=log_dir,
         verbose=process_params['verbose'],
         similar=process_params['similar'],
-        few_shot=process_params['few_shot']
+        few_shot=process_params['few_shot'],
+        dsl_enabled=process_params['dsl_enabled']
     )
 
     # Get output directory from config file
-    output_dir = config['output']['results_dir']
+    output_dir = f"results/{exp_name}"
+
     save_results(results, output_dir=output_dir)
+    successful = sum(1 for r in results if r.success)
+    total_score = sum(r.score for r in results)
+    
+    wandb.log({
+        "success_rate": successful / len(results) if results else 0,
+        "avg_score": total_score / len(results) if results else 0,
+        "total_tasks": len(results),
+        "successful_tasks": successful
+    })
+    wandb.finish()
 
 
 if __name__ == "__main__":

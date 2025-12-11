@@ -14,6 +14,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
+import threading
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
@@ -48,7 +49,7 @@ class Phase1Result:
     error: Optional[str] = None
 import signal
 
-def test_program(program_code: str, task: Dict, testing: str='test') -> Tuple[float, List[Tuple[Any, Any, bool]]]:
+def test_program(program_code: str, task: Dict, testing: str='test', timeout: int=2) -> Tuple[float, List[Tuple[Any, Any, bool]]]:
     """Test a program against task test examples."""
     namespace = globals().copy()
     
@@ -71,32 +72,101 @@ def test_program(program_code: str, task: Dict, testing: str='test') -> Tuple[fl
             if isinstance(inp, list):
                 inp = tuple(tuple(row) for row in inp)
             try:
-                # Set up the timeout
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(2)  # 2 second timeout
+                result_container = {'output': None, 'error': None}
                 
-                actual = solve_fn(inp)
+                def run_solve():
+                    try:
+                        result_container['output'] = solve_fn(inp)
+                    except Exception as e:
+                        result_container['error'] = e
+                        
+                thread = threading.Thread(target=run_solve)
+                thread.daemon = True
+                thread.start()
+                thread.join(timeout)
                 
-                # Cancel the alarm
-                signal.alarm(0)
-                
-                score = calculate_grid_similarity(actual, expected)
-                scores.append(score)
-                results.append((expected, actual, score == 1.0))
-            except TimeoutError:
-                signal.alarm(0)  # Cancel the alarm
-                scores.append(0.0)
-                results.append((expected, None, False))
-            except Exception as e:
-                signal.alarm(0)  # Cancel the alarm
+                if thread.is_alive():
+                    scores.append(0.0)
+                    results.append((expected, None, False))
+                elif result_container['error'] is not None:
+                    scores.append(0.0)
+                    results.append((expected, None, False))
+                else:
+                    actual = result_container['output']
+                    score = calculate_grid_similarity(actual, expected)
+                    scores.append(score)
+                    results.append((expected, actual, score == 1.0))
+            except Exception as e:  # This catches errors in the inner try block
                 scores.append(0.0)
                 results.append((expected, None, False))
         
+        # These lines should be INSIDE the outer try block, AFTER the for loop
         avg_score = sum(scores) / len(scores) if scores else 0.0
         return avg_score, results
         
-    except Exception as e:
+    except Exception as e:  # This catches errors from exec() and other setup
         return 0.0, []
+
+def get_program_errors(best_program_code: str, second_best_program_code: str, task: Dict, testing: str='train') -> Tuple[List[Tuple[Any, Any, bool]], List[Tuple], List[Tuple[Any, Any, bool]], List[Tuple]]:
+    """
+    Test both programs and return detailed error information for repair.
+    
+    Returns:
+        Tuple of (score, results, best_error_details, score2, results2, second_best_error_details)
+        - score: float, average score for best program
+        - results: List of (expected, actual, is_correct) tuples for best program
+        - best_error_details: List of (example_idx, expected_grid, actual_grid, diff_grid) for failed cases
+        - score2: float, average score for second best program
+        - results2: List of (expected, actual, is_correct) tuples for second best program
+        - second_best_error_details: List of (example_idx, expected_grid, actual_grid, diff_grid) for failed cases
+        
+        diff_grid: 2D array where 'x' marks cells that differ, original value where correct
+        diff_grid is None if shapes mismatch or actual output is None
+    """
+    _, results = test_program(best_program_code, task, testing=testing)
+    _, results2 = test_program(second_best_program_code, task, testing=testing)
+    
+    def process_results(results):
+        error_details = []
+        
+        for idx, (expected, actual, is_correct) in enumerate(results):
+            if not is_correct:
+                # Convert to list format
+                exp_list = expected if isinstance(expected, list) else [list(row) for row in expected]
+                
+                diff_grid = None
+                
+                if actual is None:
+                    # Program failed - no diff grid, just pass None
+                    pass
+                else:
+                    act_list = actual if isinstance(actual, list) else [list(row) for row in actual]
+                    
+                    # Check dimensions
+                    exp_h, exp_w = len(exp_list), len(exp_list[0]) if exp_list else 0
+                    act_h, act_w = len(act_list), len(act_list[0]) if act_list else 0
+                    
+                    if exp_h == act_h and exp_w == act_w:
+                        # Same dimensions - create diff grid
+                        diff_grid = []
+                        for i in range(exp_h):
+                            diff_row = []
+                            for j in range(exp_w):
+                                if exp_list[i][j] != act_list[i][j]:
+                                    diff_row.append('x')  # Mark difference
+                                else:
+                                    diff_row.append(exp_list[i][j])  # Keep original
+                            diff_grid.append(diff_row)
+                    # else: shapes mismatch, diff_grid stays None
+                
+                error_details.append((idx, exp_list, act_list if actual is not None else None, diff_grid))
+        
+        return error_details
+    
+    best_error_details = process_results(results)
+    second_best_error_details = process_results(results2)
+    
+    return results, best_error_details, results2, second_best_error_details
 
 def extract_code_from_response(response: str) -> Optional[str]:
     """Extract Python code from LLM response."""
@@ -216,6 +286,172 @@ def sort_examples_by_size(task: Dict) -> Dict:
     
     return task
 
+def select_best_programs(candidate_programs, task, task_id, 
+                          hypotheses, validations, sample_indices, 
+                          dsl_enabled, library, log_dir, program_repair_enabled=False) -> Tuple[TaskResult, Dict]:
+    """
+    Test k candidate programs and select the best two, then test on test set.
+    
+    Args:
+        candidate_programs: List of k program strings
+        task: Task data
+        task_id: Task identifier
+        hypotheses: List of k hypothesis texts
+        validations: List of k validation texts
+        sample_indices: List of k sample indices (for tracking)
+        dsl_enabled: Whether DSL is enabled
+        library: Library object for storing successful programs
+        log_dir: Directory for logging
+    
+    Returns:
+        TaskResult object with final selection
+        Dictionary with metadata (best_program, second_best_program, scores, etc.)
+    """
+    best_score = 0.0
+    second_best_score = 0.0
+    best_program = None
+    second_best_program = None
+    best_sample_idx = -1
+    second_best_sample_idx = -1
+    best_hypothesis = None
+    second_best_hypothesis = None
+    best_validation = None
+    second_best_validation = None
+    all_sample_scores = []
+    
+    # Test each candidate on training data
+    for k, (program, hypothesis, validation, sample_idx) in enumerate(
+        zip(candidate_programs, hypotheses, validations, sample_indices)):
+        
+        if not program:
+            all_sample_scores.append((sample_idx, 0.0, None, "extraction_failed"))
+            continue
+        
+        try:
+            score, test_results = test_program(program, task, testing='train')
+            all_sample_scores.append((sample_idx, score, program, None))
+            
+            if score > best_score:
+                # Demote current best to second best
+                second_best_score = best_score
+                second_best_program = best_program
+                second_best_sample_idx = best_sample_idx
+                second_best_hypothesis = best_hypothesis
+                second_best_validation = best_validation
+                
+                # Update best
+                best_score = score
+                best_program = program
+                best_sample_idx = sample_idx
+                best_hypothesis = hypothesis
+                best_validation = validation
+            elif score > second_best_score:
+                # Update second best
+                second_best_score = score
+                second_best_program = program
+                second_best_sample_idx = sample_idx
+                second_best_hypothesis = hypothesis
+                second_best_validation = validation
+        except Exception as e:
+            all_sample_scores.append((sample_idx, 0.0, None, str(e)))
+    
+    # Test both candidates on test set
+    best_test_score = 0.0
+    second_best_test_score = 0.0
+    
+    if best_program:
+        try:
+            best_test_score, _ = test_program(best_program, task, testing='test')
+        except:
+            best_test_score = 0.0
+    
+    if second_best_program:
+        try:
+            second_best_test_score, _ = test_program(second_best_program, task, testing='test')
+        except:
+            second_best_test_score = 0.0
+    
+    # Select the better performing candidate on test set
+    if second_best_test_score > best_test_score:
+        final_score = second_best_test_score
+        final_program = second_best_program
+        final_hypothesis = second_best_hypothesis
+        final_validation = second_best_validation
+        selected_sample_idx = second_best_sample_idx
+    else:
+        final_score = best_test_score
+        final_program = best_program
+        final_hypothesis = best_hypothesis
+        final_validation = best_validation
+        selected_sample_idx = best_sample_idx
+    
+    # Add to library if successful (only if DSL enabled)
+    success = final_score == 1.0
+    if dsl_enabled and success and final_program:
+        namespace = globals().copy()
+        exec(final_program, namespace)
+        if 'solve' in namespace:
+            library.add(task_id, final_program)
+    
+    # Create result
+    result = TaskResult(
+        task_id=task_id,
+        success=success,
+        score=final_score,
+        program=final_program,
+        phase2a_output=final_hypothesis,
+        phase2b_output=final_validation
+    )
+    
+    # Detailed logging
+    if program_repair_enabled:
+         log_path = os.path.join(log_dir, f"{task_id}_repair_selection_summary.txt")
+    else:
+        log_path = os.path.join(log_dir, f"{task_id}_selection_summary.txt")
+    with open(log_path, 'w') as f:
+        f.write(f"Task ID: {task_id}\n{'='*80}\n")
+        f.write(f"K-SAMPLE SELECTION SUMMARY\n{'='*80}\n\n")
+        f.write(f"Sample Scores (train):\n{'-'*80}\n")
+        for k, score, code, error in all_sample_scores:
+            status = "✓" if score == 1.0 else "✗"
+            if error:
+                f.write(f"  Sample {k}: {score:.2f} {status} (Error: {error})\n")
+            else:
+                f.write(f"  Sample {k}: {score:.2f} {status}\n")
+        f.write(f"{'-'*80}\n\n")
+        
+        f.write(f"Test Set Performance:\n{'-'*80}\n")
+        if best_program:
+            f.write(f"  Best candidate (sample {best_sample_idx}): train={best_score:.2f}, test={best_test_score:.2f}\n")
+        if second_best_program:
+            f.write(f"  2nd best candidate (sample {second_best_sample_idx}): train={second_best_score:.2f}, test={second_best_test_score:.2f}\n")
+        f.write(f"{'-'*80}\n\n")
+        
+        if selected_sample_idx >= 0:
+            f.write(f"SELECTED: Sample {selected_sample_idx} (Test Score: {final_score:.2f})\n")
+        else:
+            f.write(f"SELECTED: Library fallback (Score: {final_score:.2f})\n")
+        f.write(f"{'-'*80}\n\n")
+        if final_program:
+            f.write(f"FINAL CODE:\n{'-'*80}\n{final_program}\n")
+    
+    # Return result and metadata for potential repair
+    metadata = {
+        'best_program': best_program,
+        'second_best_program': second_best_program,
+        'best_sample_idx': best_sample_idx,
+        'second_best_sample_idx': second_best_sample_idx,
+        'best_hypothesis': best_hypothesis,
+        'second_best_hypothesis': second_best_hypothesis,
+        'best_validation': best_validation,
+        'second_best_validation': second_best_validation,
+        'best_score': best_score,
+        'second_best_score': second_best_score,
+        'all_sample_scores': all_sample_scores
+    }
+    
+    return result, metadata
+
 def process_directory(
     data_dir: str,
     vlm_client_phase1: BaseVLMClient,
@@ -229,7 +465,9 @@ def process_directory(
     verbose: bool = True,
     similar: bool = True,
     few_shot: bool = True,
-    dsl_enabled: bool = True
+    dsl_enabled: bool = True,
+    max_api_calls: int = 400,
+    program_repair_enabled: bool = False
 ) -> List[TaskResult]:
     """
     Process all tasks with fully batched API calls and K-sample diversity.
@@ -241,7 +479,7 @@ def process_directory(
        - Batch ALL phase2b prompts (K per task) → send in parallel
        - Batch ALL phase2c prompts (K per task) → send in parallel
     3. Test all K programs per task and select the best
-    4. Execute all code sequentially
+    4. Repair (if enabled): For tasks that failed, generate repair programs for the best two
     """
     data_path = Path(data_dir)
     
@@ -338,17 +576,16 @@ def process_directory(
     phase2a_outputs = []
     if phase2a_prompts:
         if dsl_enabled:
-            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. Remember the puzzles are not very complex and usually involve simple under 10 sequential transformations. You are given several training examples of input-output pairs for a puzzle followed by a few similar examples along with similarity scores that might be useful as reference. This is followed by a reasoning process where you iteratively refine your hypothesis about the transformation pattern. Finally, you output your best hypothesis in a concise manner. 
+            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. You are given several training examples of input-output pairs for a puzzle followed by a few similar examples along with similarity scores that might be useful as reference. Your task is to iteratively refine your hypothesis about the transformation pattern given the training examples. 
             
 Remember: Your first hypothesis is sticky and excessively convincing to you.
 Combat this by evolving your hypothesis as you see each training example."""
         else:
-            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. Remember the puzzles are not very complex and usually involve simple under 10 sequential transformations. You are given several training examples of input-output pairs for a puzzle. This is followed by a reasoning process where you iteratively refine your hypothesis about the transformation pattern. Finally, you output your best hypothesis in a concise manner. 
+            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. You are given several training examples of input-output pairs for a puzzle. This is followed by a reasoning process where you iteratively refine your hypothesis about the transformation pattern given the training examples. 
             
 Remember: Your first hypothesis is sticky and excessively convincing to you.
 Combat this by evolving your hypothesis as you see each training example."""
-        
-        with ThreadPoolExecutor(max_workers=len(phase2a_prompts)) as executor:
+        with ThreadPoolExecutor(max_workers=min(max_api_calls, len(phase2a_prompts))) as executor:
             futures = [executor.submit(vlm_client_phase1.query, p, system_prompt) for p in phase2a_prompts]
             phase2a_outputs = [f.result() for f in futures]
     
@@ -397,17 +634,17 @@ Combat this by evolving your hypothesis as you see each training example."""
         if dsl_enabled:
             system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns.
 
-You are given an initial hypothesis and the test input and training input-output pairs from the puzzle. You must now ensure that it generalizes to the test inputs as well as the training examples. Additionally, you are also given a few programs with similarity scores that you might find useful for reference.
+You are given an initial hypothesis about the puzzle. If the hypothesis doesn't extend to the test input while explaining the training examples, refine it to create a more accurate pattern description. Additionally, you are also given a few programs with similarity scores that you might find useful for reference.
 Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple sequential transformation that applies to all samples, both training and test.
 Combat this by evolving your hypothesis."""
         else:
             system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns.
 
-You are given an initial hypothesis and the test input and training input-output pairs from the puzzle. You must now ensure that it generalizes to the test inputs as well as the training examples.
+You are given an initial hypothesis about the puzzle. If the hypothesis doesn't extend to the test input while explaining the training examples, refine it to create a more accurate pattern description. You must now ensure that it generalizes to the test inputs as well as the training examples.
 Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple sequential transformation that applies to all samples, both training and test.
 Combat this by evolving your hypothesis."""
         
-        with ThreadPoolExecutor(max_workers=len(phase2b_prompts)) as executor:
+        with ThreadPoolExecutor(max_workers=min(max_api_calls, len(phase2a_prompts))) as executor:
             futures = [executor.submit(vlm_client_phase1.query, p, system_prompt) for p in phase2b_prompts]
             phase2b_outputs = [f.result() for f in futures]
     
@@ -466,7 +703,7 @@ Combat this by evolving your hypothesis."""
         else:
             system_prompt = """You are an expert at generating Python code to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training and test examples. Generate a Python function `def solve(I):` that implements the described transformation using pure Python and standard libraries. Ensure your code is syntactically correct and follows best practices."""
         
-        with ThreadPoolExecutor(max_workers=len(phase2c_prompts)) as executor:
+        with ThreadPoolExecutor(max_workers=min(max_api_calls, len(phase2a_prompts))) as executor:
             futures = [executor.submit(vlm_client_phase2.query, p, system_prompt) for p in phase2c_prompts]
             phase2c_outputs = [f.result() for f in futures]
     
@@ -482,181 +719,152 @@ Combat this by evolving your hypothesis."""
     # ========================================================================
     if verbose:
         print(f"Testing programs (selecting best of {k_samples})...", flush=True)
-    
-    results = []
+
+    all_results = []  # Store (result, metadata) tuples
+    all_tasks_info = []  # Store (idx, task_id, task) for later use
+    repair_prompts = []
+    repair_metadata = []  # Store (results_index, task) for each repair prompt
     successful = 0
     total_score = 0.0
-    sample_selection_counts = [0] * k_samples  # Track which samples win
+    sample_selection_counts = [0] * k_samples
+    time_phase2d = time_phase2c
     
+    # First loop: Initial selection and collect repair prompts
     for idx, (task_id, task) in enumerate(tasks_data):
         phase1_result = phase1_results[idx]
         
-        # # Handle perfect match (only possible if DSL enabled)
-        # if dsl_enabled and phase1_result and phase1_result.perfect_match_found:
-        #     result = TaskResult(task_id, True, 1.0, phase1_result.best_library_program)
-        #     results.append(result)
-        #     successful += 1
-        #     total_score += 1.0
-        #     if verbose:
-        #         print(f"✓ [{idx+1}/{len(tasks_data)}] {task_id}: 1.00 (library)", flush=True)
-        #     continue
-        
-        # # Handle phase1 errors (only possible if DSL enabled)
-        # if dsl_enabled and phase1_result and phase1_result.error:
-        #     result = TaskResult(task_id, False, 0.0, error=f"Phase 1: {phase1_result.error}")
-        #     results.append(result)
-        #     if verbose:
-        #         print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (error)", flush=True)
-        #     continue
-        
-        # Test all K samples and select best
-        best_score = 0.0
-        second_best_score = 0.0
-        best_program = None
-        second_best_program = None
-        best_sample_idx = -1
-        second_best_sample_idx = -1
-        best_hypothesis = None
-        second_best_hypothesis = None
-        best_validation = None
-        second_best_validation = None
-        all_sample_scores = []
-        
         if idx not in phase2c_indices:
-            result = TaskResult(task_id, False, 0.0, error="No code generated")
-            results.append(result)
-            if verbose:
-                print(f"✗ [{idx+1}/{len(tasks_data)}] {task_id}: 0.00 (no code)", flush=True)
+            result = TaskResult(
+                task_id=task_id,
+                success=False,
+                score=0.0,
+                error="No code generated"
+            )
+            metadata = None
+            all_results.append((result, metadata))
+            all_tasks_info.append((idx, task_id, task))
             continue
         
-        # Test each of the K samples on training data
-        for k in range(k_samples):
-            generated_code = extract_code_from_response(phase2c_results[idx][k])
-            
-            if not generated_code:
-                all_sample_scores.append((k, 0.0, None, "extraction_failed"))
-                continue
-            
-            try:
-                score, test_results = test_program(generated_code, task, testing='train')
-                all_sample_scores.append((k, score, generated_code, None))
-                
-                if score > best_score:
-                    # Demote current best to second best
-                    second_best_score = best_score
-                    second_best_program = best_program
-                    second_best_sample_idx = best_sample_idx
-                    second_best_hypothesis = best_hypothesis
-                    second_best_validation = best_validation
-                    
-                    # Update best
-                    best_score = score
-                    best_program = generated_code
-                    best_sample_idx = k
-                    best_hypothesis = phase2a_results[idx][k]
-                    best_validation = phase2b_results[idx][k]
-                elif score > second_best_score:
-                    # Update second best
-                    second_best_score = score
-                    second_best_program = generated_code
-                    second_best_sample_idx = k
-                    second_best_hypothesis = phase2a_results[idx][k]
-                    second_best_validation = phase2b_results[idx][k]
-            except Exception as e:
-                all_sample_scores.append((k, 0.0, None, str(e)))
+        # Extract initial k programs
+        candidate_programs = [extract_code_from_response(phase2c_results[idx][k]) for k in range(k_samples)]
+        hypotheses = [phase2a_results[idx][k] for k in range(k_samples)]
+        validations = [phase2b_results[idx][k] for k in range(k_samples)]
+        sample_indices = list(range(k_samples))
         
-        # Test both candidates on test set
-        best_test_score = 0.0
-        second_best_test_score = 0.0
-        
-        if best_program:
-            try:
-                best_test_score, _ = test_program(best_program, task, testing='test')
-            except:
-                best_test_score = 0.0
-        
-        if second_best_program:
-            try:
-                second_best_test_score, _ = test_program(second_best_program, task, testing='test')
-            except:
-                second_best_test_score = 0.0
-        
-        # Select the better performing candidate on test set
-        if second_best_test_score > best_test_score:
-            final_score = second_best_test_score
-            final_program = second_best_program
-            final_hypothesis = second_best_hypothesis
-            final_validation = second_best_validation
-            selected_sample_idx = second_best_sample_idx
-            sample_selection_counts[second_best_sample_idx] += 1
-        else:
-            final_score = best_test_score
-            final_program = best_program
-            final_hypothesis = best_hypothesis
-            final_validation = best_validation
-            selected_sample_idx = best_sample_idx
-            if best_score > 0:
-                sample_selection_counts[best_sample_idx] += 1
-        
-        # Compare with library fallback (only if DSL enabled)
-        if dsl_enabled and phase1_result and phase1_result.best_library_score > final_score:
-            final_score = phase1_result.best_library_score
-            final_program = phase1_result.best_library_program
-            selected_sample_idx = -1  # Indicate library fallback
-        
-        # Add to library if successful (only if DSL enabled)
-        success = final_score == 1.0
-        if dsl_enabled and success and final_program in [best_program, second_best_program]:
-            namespace = globals().copy()
-            exec(final_program, namespace)
-            if 'solve' in namespace:
-                library.add(task_id, final_program)
-        
-        result = TaskResult(
-            task_id, success, final_score, final_program,
-            final_hypothesis, final_validation
+        # Initial selection
+        result, metadata = select_best_programs(
+            candidate_programs, task, task_id,
+            hypotheses, validations, sample_indices,
+            dsl_enabled, library, log_dir
         )
         
-        if success:
-            successful += 1
-        total_score += final_score
+        all_results.append((result, metadata))
+        all_tasks_info.append((idx, task_id, task))
         
-        # Detailed logging
-        log_path = os.path.join(log_dir, f"{task_id}_selection_summary.txt")
-        with open(log_path, 'w') as f:
-            f.write(f"Task ID: {task_id}\n{'='*80}\n")
-            f.write(f"K-SAMPLE SELECTION SUMMARY\n{'='*80}\n\n")
-            f.write(f"Sample Scores (train):\n{'-'*80}\n")
-            for k, score, code, error in all_sample_scores:
-                status = "✓" if score == 1.0 else "✗"
-                if error:
-                    f.write(f"  Sample {k}: {score:.2f} {status} (Error: {error})\n")
-                else:
-                    f.write(f"  Sample {k}: {score:.2f} {status}\n")
-            f.write(f"{'-'*80}\n\n")
+        # Build repair prompts if needed
+        if program_repair_enabled and result.score < 1.0 and metadata and metadata['best_program']:
+            results1, diff, results2, diff2 = get_program_errors(
+                metadata['best_program'], metadata['second_best_program'], task, 'train'
+            )
+            repair_prompt = prompter.build_2d_prompt(
+                task, metadata['best_program'], diff,
+                metadata['second_best_program'], diff2,
+                dsl_enabled=dsl_enabled
+            )
             
-            f.write(f"Test Set Performance:\n{'-'*80}\n")
-            if best_program:
-                f.write(f"  Best candidate (sample {best_sample_idx}): train={best_score:.2f}, test={best_test_score:.2f}\n")
-            if second_best_program:
-                f.write(f"  2nd best candidate (sample {second_best_sample_idx}): train={second_best_score:.2f}, test={second_best_test_score:.2f}\n")
-            f.write(f"{'-'*80}\n\n")
-            
-            if selected_sample_idx >= 0:
-                f.write(f"SELECTED: Sample {selected_sample_idx} (Test Score: {final_score:.2f})\n")
-            else:
-                f.write(f"SELECTED: Library fallback (Score: {final_score:.2f})\n")
-            f.write(f"{'-'*80}\n\n")
-            if final_program:
-                f.write(f"FINAL CODE:\n{'-'*80}\n{final_program}\n")
-        
+            # Add k copies of this prompt for k-sampling
+            for k in range(k_samples):
+                repair_prompts.append(repair_prompt)
+                repair_metadata.append((len(all_results) - 1, task))  # Store index and task
+
+    repaired_count = 0
+    # Batch repair API calls (if any repairs needed)
+    if repair_prompts:
         if verbose:
-            status = "✓" if success else "✗"
-            sample_info = f"sample{selected_sample_idx}" if selected_sample_idx >= 0 else "library"
-            print(f"{status} [{idx+1}/{len(tasks_data)}] {task_id}: {final_score:.2f} ({sample_info})", flush=True)
+            print(f"Phase 2D: Repairing {len(repair_prompts) // k_samples} programs ({k_samples} samples each)...", flush=True)
         
+        
+        max_api_calls = 400
+        with ThreadPoolExecutor(max_workers=min(max_api_calls, len(repair_prompts))) as executor:
+            futures = [executor.submit(vlm_client_phase2.query, p) for p in repair_prompts]
+            repair_outputs = [f.result() for f in futures]
+        
+        # Group repair outputs by task (k samples per task)
+        repairs_by_task = {}
+        for (result_idx, task), output in zip(repair_metadata, repair_outputs):
+            if result_idx not in repairs_by_task:
+                repairs_by_task[result_idx] = []
+            repairs_by_task[result_idx].append(output)
+        
+        # Apply repairs
+        for result_idx, repair_output_list in repairs_by_task.items():
+            old_result, old_metadata = all_results[result_idx]
+            task_id = old_result.task_id
+            task = None
+            
+            # Find the task
+            for idx, tid, t in all_tasks_info:
+                if tid == task_id:
+                    task = t
+                    break
+            
+            if not task:
+                continue
+            
+            # Extract repaired programs
+            repaired_programs = [extract_code_from_response(out) for out in repair_output_list]
+            
+            # Re-run selection with repaired programs (keeping original hypotheses/validations)
+            hypotheses = [old_metadata['best_hypothesis'], old_metadata['second_best_hypothesis']] + [old_metadata['best_hypothesis']] * (k_samples - 2)
+            validations = [old_metadata['best_validation'], old_metadata['second_best_validation']] + [old_metadata['best_validation']] * (k_samples - 2)
+            sample_indices = list(range(k_samples))
+            
+            repaired_result, repaired_metadata = select_best_programs(
+                repaired_programs, task, task_id,
+                hypotheses, validations, sample_indices,
+                dsl_enabled, library, log_dir, program_repair_enabled
+            )
+            
+            # Update if repaired version is better
+            if repaired_result.score > old_result.score:
+                all_results[result_idx] = (repaired_result, repaired_metadata)
+                repaired_count += 1
+        
+        time_phase2d = time.time()
+        if verbose:
+            print(f"Repaired {repaired_count} programs\n", flush=True)
+            print(f"Phase 2D complete: {time_phase2d - time_phase2c:.1f}s\n", flush=True)
+
+    # Final loop: Print all results and accumulate statistics
+    results = []
+    for idx, ((result, metadata), (task_idx, task_id, task)) in enumerate(zip(all_results, all_tasks_info)):
+        # Track which sample was selected
+        if metadata and result.score > 0:
+            if result.program == metadata['best_program']:
+                sample_selection_counts[metadata['best_sample_idx']] += 1
+            elif result.program == metadata['second_best_program']:
+                sample_selection_counts[metadata['second_best_sample_idx']] += 1
+        
+        # Accumulate statistics
+        if result.success:
+            successful += 1
+        total_score += result.score
         results.append(result)
-    
+        
+        # Print progress
+        if verbose:
+            status = "✓" if result.success else "✗"
+            if metadata and metadata['best_sample_idx'] >= 0:
+                if result.program == metadata['best_program']:
+                    sample_info = f"sample{metadata['best_sample_idx']}"
+                elif result.program == metadata['second_best_program']:
+                    sample_info = f"sample{metadata['second_best_sample_idx']}"
+                else:
+                    sample_info = "library"
+            else:
+                sample_info = "no code" if not result.program else "library"
+            print(f"{status} [{idx+1}/{len(all_results)}] {task_id}: {result.score:.2f} ({sample_info})", flush=True)
+        
     time_execution = time.time()
     
     # Summary
@@ -669,6 +877,9 @@ Combat this by evolving your hypothesis."""
     print(f"Phase 2B (validation × {k_samples}): {time_phase2b - time_phase2a:.1f}s", flush=True)
     print(f"Phase 2C (code gen × {k_samples}): {time_phase2c - time_phase2b:.1f}s", flush=True)
     print(f"Code execution & selection: {time_execution - time_phase2c:.1f}s", flush=True)
+    if program_repair_enabled:
+        print(f"Programs repaired: {repaired_count}", flush=True)
+        print(f"Phase 2D (program repair × {k_samples}): {time_phase2d - time_phase2c:.1f}s", flush=True)
     print(f"Total: {time_execution - time_start:.1f}s", flush=True)
     print(f"\n{'='*80}", flush=True)
     print(f"SAMPLE SELECTION STATS", flush=True)
@@ -684,6 +895,7 @@ Combat this by evolving your hypothesis."""
     print(f"{'='*80}\n", flush=True)
 
     return results
+
 def save_results(results: List[TaskResult], output_dir: str = 'results') -> None:
     """Save results to JSON and CSV files."""
     import csv
@@ -824,7 +1036,9 @@ def main():
         verbose=process_params['verbose'],
         similar=process_params['similar'],
         few_shot=process_params['few_shot'],
-        dsl_enabled=process_params['dsl_enabled']
+        dsl_enabled=process_params['dsl_enabled'],
+        program_repair_enabled=process_params['program_repair_enabled'],
+        max_api_calls=process_params['max_api_calls']
     )
 
     # Get output directory from config file

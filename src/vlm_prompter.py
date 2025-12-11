@@ -1,4 +1,4 @@
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Union
 import numpy as np
 from utils.render_legacy import grid_to_base64_png_oai_content
 
@@ -196,6 +196,92 @@ If it doesn't fit perfectly, identify what needs to be refined.
         })
         
         return content_blocks
+
+    def build_2d_prompt(self,
+                        task: Dict[str, Any],
+                        best_program_code: str,
+                        diff_grid:  List[Tuple],
+                        second_best_program_code: str,
+                        diff_grid2:  List[Tuple],
+                        dsl_enabled: bool = True) -> List[Dict[str, Any]]:
+        """
+        Build 2D prompt: Single-step prompt for combined hypothesis formation and code generation.
+        """
+        content_blocks = []
+        content_blocks.append({
+            "type": "text",
+            "text": "You are an expert at debugging and repairing Python code for ARC puzzles.\n"
+        })
+        
+        content_blocks.append({
+            "type": "text",
+            "text": "You are given a 2D ARC task with training and test samples. You are also given 2 programs that were generated in response to the ARC task. However, they are incorrect. You are given the corresponding output of the incorrect programs and the difference with the actual output from the training samples if available. Your goal is to generate a Python `solve(I)` to solve these tasks."
+        })
+        if dsl_enabled:
+            content_blocks.append({
+                "type": "text",
+                "text": " using ONLY the DSL primitives below.\n\n"
+            })
+        else:
+            content_blocks.append({
+                "type": "text",
+                "text": ".\n\n"
+            })
+        
+        # Add training examples section
+        content_blocks.append({
+            "type": "text",
+            "text": "## Training Examples\n"
+        })
+        
+        # Format training examples (with images)
+        content_blocks.extend(self._format_training_examples(task['train'], include_images=True))
+        
+        # Format test examples (input only, no output)
+        content_blocks.extend(self._format_test_examples(task['test'], include_images=True))
+        
+        # Add first incorrect program and diff grid
+        content_blocks.append({
+            "type": "text",
+            "text": f"\n## First Incorrect Program\n```python\n{best_program_code}\n```\n"
+        })
+        
+        content_blocks.append({
+            "type": "text",
+            "text": "### Difference Grid from Actual Output\n"
+        })
+        content_blocks.append({
+            "type": "text",
+            "text": f"\nASCII representation:\n{self._format_grid(diff_grid, separator='|')}\n"
+        })
+        
+        # Add second incorrect program and diff grid
+        content_blocks.append({
+            "type": "text",
+            "text": f"\n## Second Incorrect Program\n```python\n{second_best_program_code}\n```\n"
+        })
+        
+        content_blocks.append({
+            "type": "text",
+            "text": "### Difference Grid from Actual Output\n"
+        })
+        content_blocks.append({
+            "type": "text",
+            "text": f"\nASCII representation:\n{self._format_grid(diff_grid2, separator='|')}\n"
+        })
+        # Add DSL primitives or Python instructions (dynamically generated)
+        if dsl_enabled:
+            content_blocks.append({
+                "type": "text",
+                "text": self._get_phase2c_dsl_section(dsl_enabled)
+            })
+        
+        content_blocks.append({
+            "type": "text",
+            "text": "Generate the `solve(I)` function now.\n"
+        })
+        
+        return content_blocks
     
     def _format_test_examples(self, test_examples: List[Dict[str, Any]], include_images: bool = True) -> List[Dict[str, Any]]:
         """Format test examples as content blocks with images (input only, no output)"""
@@ -295,7 +381,7 @@ If it doesn't fit perfectly, identify what needs to be refined.
         
         return content_blocks   
     
-    def _format_grid(self, grid: Tuple[Tuple[int]], separator: str = "|") -> str:
+    def _format_grid(self, grid: Union[Tuple[Tuple[int]], List[List]], separator: str = "|") -> str:
         return "\n".join(separator.join(str(cell) for cell in row) for row in grid)
     
     def _format_similar_programs(self, similar_programs: List[Dict[str, Any]]) -> str:
@@ -307,8 +393,13 @@ If it doesn't fit perfectly, identify what needs to be refined.
             similarity = prog.get('similarity', 0.0)
             program_code = prog.get('program', '')
             task_id = prog.get('task_id', 'unknown')
+            example_scores = prog.get('example_scores', [])
+            perfect_count = sum(1 for s in example_scores if s == 1.0)
+            total_examples = len(example_scores)
             
             lines.append(f"Similar Program {idx} (similarity: {similarity:.2f}, task: {task_id}):")
+            if total_examples > 0:
+                lines.append(f"# This program solved {perfect_count}/{total_examples} training examples perfectly.")
             lines.append("```python")
             lines.append(program_code)
             lines.append("```")

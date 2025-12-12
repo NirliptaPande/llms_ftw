@@ -4,7 +4,7 @@ provider: "grok"  # Options: "grok", "qwen", "gemini"
 
 # Model Configuration
 model:
-  name: "x-ai/grok-4-fast"
+  name: "x-ai/grok-4.1-fast"
   api_base: "https://openrouter.ai/api/v1"
 
 # VLM Configuration
@@ -27,17 +27,19 @@ vlm_config:
 
 # Process Directory Parameters
 process_directory:
-  data_dir: "data_v1/eval_size_10"
+  data_dir: "data_v2/evaluation"
   timeout: 5
   k_samples: 4
   max_find_similar_workers: 56
-  log_dir: "testing"
+  log_dir: "testingv2_repair"
   verbose: true
   similar: true
   few_shot: true
   dsl_enabled: true
+  program_repair_enabled: true
+  max_api_calls: 400
 
 # Output Configuration
 output:
-  results_dir: "results/testing"
+  results_dir: "results/testingv2_repair"
 #Without images, With program refinement, switch to openrouter, core concepts as language, core concepts of this solution as library,  

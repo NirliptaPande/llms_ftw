@@ -203,7 +203,8 @@ If it doesn't fit perfectly, identify what needs to be refined.
                         diff_grid:  List[Tuple],
                         second_best_program_code: str,
                         diff_grid2:  List[Tuple],
-                        dsl_enabled: bool = True) -> List[Dict[str, Any]]:
+                        dsl_enabled: bool = True,
+                        validated_pattern = None) -> List[Dict[str, Any]]:
         """
         Build 2D prompt: Single-step prompt for combined hypothesis formation and code generation.
         """
@@ -215,7 +216,7 @@ If it doesn't fit perfectly, identify what needs to be refined.
         
         content_blocks.append({
             "type": "text",
-            "text": "You are given a 2D ARC task with training and test samples. You are also given 2 programs that were generated in response to the ARC task. However, they are incorrect. You are given the corresponding output of the incorrect programs and the difference with the actual output from the training samples if available. Your goal is to generate a Python `solve(I)` to solve these tasks."
+            "text": "You are given a 2D ARC task with training and test samples. You are also given 2 programs that were generated in response to the ARC task and the hypothesis htey were generated in response to. However, they are incorrect and the hypothesis may also be incorrect. You are given the corresponding output of the incorrect programs and the difference with the actual output from the training samples if available. Your goal is to generate a Python `solve(I)` to solve these tasks."
         })
         if dsl_enabled:
             content_blocks.append({
@@ -239,6 +240,12 @@ If it doesn't fit perfectly, identify what needs to be refined.
         
         # Format test examples (input only, no output)
         content_blocks.extend(self._format_test_examples(task['test'], include_images=True))
+        
+        #Add hypothesis
+        content_blocks.append({
+            "type": "text",
+            "text": f"\n## Initial Hypothesis\n{validated_pattern}\n"
+        })
         
         # Add first incorrect program and diff grid
         content_blocks.append({

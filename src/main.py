@@ -49,7 +49,7 @@ class Phase1Result:
     error: Optional[str] = None
 import signal
 
-def test_program(program_code: str, task: Dict, testing: str='test', timeout: int=2) -> Tuple[float, List[Tuple[Any, Any, bool]]]:
+def test_program(program_code: str, task: Dict, testing: str='test') -> Tuple[float, List[Tuple[Any, Any, bool]]]:
     """Test a program against task test examples."""
     namespace = globals().copy()
     
@@ -72,41 +72,33 @@ def test_program(program_code: str, task: Dict, testing: str='test', timeout: in
             if isinstance(inp, list):
                 inp = tuple(tuple(row) for row in inp)
             try:
-                result_container = {'output': None, 'error': None}
+                # Set up the timeout
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(2)  # 2 second timeout
                 
-                def run_solve():
-                    try:
-                        result_container['output'] = solve_fn(inp)
-                    except Exception as e:
-                        result_container['error'] = e
-                        
-                thread = threading.Thread(target=run_solve)
-                thread.daemon = True
-                thread.start()
-                thread.join(timeout)
+                actual = solve_fn(inp)
                 
-                if thread.is_alive():
-                    scores.append(0.0)
-                    results.append((expected, None, False))
-                elif result_container['error'] is not None:
-                    scores.append(0.0)
-                    results.append((expected, None, False))
-                else:
-                    actual = result_container['output']
-                    score = calculate_grid_similarity(actual, expected)
-                    scores.append(score)
-                    results.append((expected, actual, score == 1.0))
-            except Exception as e:  # This catches errors in the inner try block
+                # Cancel the alarm
+                signal.alarm(0)
+                
+                score = calculate_grid_similarity(actual, expected)
+                scores.append(score)
+                results.append((expected, actual, score == 1.0))
+            except TimeoutError:
+                signal.alarm(0)  # Cancel the alarm
+                scores.append(0.0)
+                results.append((expected, None, False))
+            except Exception as e:
+                signal.alarm(0)  # Cancel the alarm
                 scores.append(0.0)
                 results.append((expected, None, False))
         
-        # These lines should be INSIDE the outer try block, AFTER the for loop
         avg_score = sum(scores) / len(scores) if scores else 0.0
         return avg_score, results
         
-    except Exception as e:  # This catches errors from exec() and other setup
+    except Exception as e:
         return 0.0, []
-
+    
 def get_program_errors(best_program_code: str, second_best_program_code: str, task: Dict, testing: str='train') -> Tuple[List[Tuple[Any, Any, bool]], List[Tuple], List[Tuple[Any, Any, bool]], List[Tuple]]:
     """
     Test both programs and return detailed error information for repair.
@@ -123,7 +115,7 @@ def get_program_errors(best_program_code: str, second_best_program_code: str, ta
         diff_grid: 2D array where 'x' marks cells that differ, original value where correct
         diff_grid is None if shapes mismatch or actual output is None
     """
-    _, results = test_program(best_program_code, task, testing=testing)
+    _, results1 = test_program(best_program_code, task, testing=testing)#Needed?
     _, results2 = test_program(second_best_program_code, task, testing=testing)
     
     def process_results(results):
@@ -163,10 +155,10 @@ def get_program_errors(best_program_code: str, second_best_program_code: str, ta
         
         return error_details
     
-    best_error_details = process_results(results)
+    best_error_details = process_results(results1)
     second_best_error_details = process_results(results2)
     
-    return results, best_error_details, results2, second_best_error_details
+    return results1, best_error_details, results2, second_best_error_details
 
 def extract_code_from_response(response: str) -> Optional[str]:
     """Extract Python code from LLM response."""
@@ -328,7 +320,7 @@ def select_best_programs(candidate_programs, task, task_id,
             continue
         
         try:
-            score, test_results = test_program(program, task, testing='train')
+            score, train_results = test_program(program, task, testing='train')
             all_sample_scores.append((sample_idx, score, program, None))
             
             if score > best_score:
@@ -428,7 +420,7 @@ def select_best_programs(candidate_programs, task, task_id,
         f.write(f"{'-'*80}\n\n")
         
         if selected_sample_idx >= 0:
-            f.write(f"SELECTED: Sample {selected_sample_idx} (Test Score: {final_score:.2f})\n")
+            f.write(f"SELECTED: Sample {selected_sample_idx} (Test Score: {best_test_score:.2f})\n")
         else:
             f.write(f"SELECTED: Library fallback (Score: {final_score:.2f})\n")
         f.write(f"{'-'*80}\n\n")
@@ -445,8 +437,8 @@ def select_best_programs(candidate_programs, task, task_id,
         'second_best_hypothesis': second_best_hypothesis,
         'best_validation': best_validation,
         'second_best_validation': second_best_validation,
-        'best_score': best_score,
-        'second_best_score': second_best_score,
+        'best_score': best_test_score,
+        'second_best_score': second_best_test_score,
         'all_sample_scores': all_sample_scores
     }
     
@@ -675,7 +667,6 @@ Combat this by evolving your hypothesis."""
     phase2c_indices = phase2b_indices.copy()
     
     phase2c_results = [[None] * k_samples for _ in range(len(tasks_data))]
-    
     for idx in phase2c_indices:
         task_id, task = tasks_data[idx]
         phase1_result = phase1_results[idx]
@@ -763,19 +754,21 @@ Combat this by evolving your hypothesis."""
         
         # Build repair prompts if needed
         if program_repair_enabled and result.score < 1.0 and metadata and metadata['best_program']:
-            results1, diff, results2, diff2 = get_program_errors(
+            _, diff, _, diff2 = get_program_errors(
                 metadata['best_program'], metadata['second_best_program'], task, 'train'
             )
-            repair_prompt = prompter.build_2d_prompt(
-                task, metadata['best_program'], diff,
-                metadata['second_best_program'], diff2,
-                dsl_enabled=dsl_enabled
-            )
             
-            # Add k copies of this prompt for k-sampling
             for k in range(k_samples):
+                if validations[k] != None:
+                    validated_pattern = extract_validated_pattern_from_response(validations[k])
+                repair_prompt = prompter.build_2d_prompt(
+                    task, metadata['best_program'], diff,
+                    metadata['second_best_program'], diff2,
+                    dsl_enabled=dsl_enabled, validated_pattern=validated_pattern
+                )
                 repair_prompts.append(repair_prompt)
-                repair_metadata.append((len(all_results) - 1, task))  # Store index and task
+                repair_metadata.append((len(all_results) - 1, task))
+                
 
     repaired_count = 0
     # Batch repair API calls (if any repairs needed)

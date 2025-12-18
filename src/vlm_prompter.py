@@ -200,9 +200,11 @@ If it doesn't fit perfectly, identify what needs to be refined.
     def build_2d_prompt(self,
                         task: Dict[str, Any],
                         best_program_code: str,
-                        diff_grid:  List[Tuple],
+                        best_train_score: float,
+                        diff_grid: List[Tuple],
                         second_best_program_code: str,
-                        diff_grid2:  List[Tuple],
+                        second_best_train_score: float,
+                        diff_grid2: List[Tuple],
                         dsl_enabled: bool = True,
                         validated_pattern = None) -> List[Dict[str, Any]]:
         """
@@ -250,9 +252,9 @@ If it doesn't fit perfectly, identify what needs to be refined.
         # Add first incorrect program and diff grid
         content_blocks.append({
             "type": "text",
-            "text": f"\n## First Incorrect Program\n```python\n{best_program_code}\n```\n"
+            "text": f"\n## First Incorrect Program (Train Score: {best_train_score:.2f})\n```python\n{best_program_code}\n```\n"
         })
-        
+                
         content_blocks.append({
             "type": "text",
             "text": "### Difference Grid from Actual Output\n"
@@ -265,7 +267,7 @@ If it doesn't fit perfectly, identify what needs to be refined.
         # Add second incorrect program and diff grid
         content_blocks.append({
             "type": "text",
-            "text": f"\n## Second Incorrect Program\n```python\n{second_best_program_code}\n```\n"
+            "text": f"\n## Second Incorrect Program (Train Score: {second_best_train_score:.2f})\n```python\n{second_best_program_code}\n```\n"
         })
         
         content_blocks.append({
@@ -733,11 +735,12 @@ cellwise(a, b, fallback) -> Grid                  # compare grids cell-by-cell
 
 ## Requirements
 - Function signature: `def solve(I):`
+- The code should be inside a single code block ```python ... ```
 - Input `I` is tuple of tuples of ints (Grid)
 - Return same format
 - Use ONLY DSL primitives listed above
 - Add brief comments for clarity
-- Use functional programming patterns when appropriate (compose, chain, fork, lbind/rbind, mapply)
+- Use DSL functional programming patterns when appropriate (compose, chain, fork, lbind/rbind, mapply)
 - You can adapt patterns from similar programs but adjust them to match the pattern description
 
 ## Output Format

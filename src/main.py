@@ -127,31 +127,50 @@ def get_program_errors(best_program_code: str, second_best_program_code: str, ta
                 exp_list = expected if isinstance(expected, list) else [list(row) for row in expected]
                 
                 diff_grid = None
+                act_list = None
                 
                 if actual is None:
                     # Program failed - no diff grid, just pass None
                     pass
                 else:
-                    act_list = actual if isinstance(actual, list) else [list(row) for row in actual]
+                    try:
+                        # Handle case where actual might be a scalar or wrong type
+                        if isinstance(actual, (int, float, str)):
+                            # Scalar output - can't create diff grid
+                            act_list = [[actual]]  # Wrap in 2D structure for logging
+                        elif isinstance(actual, list):
+                            # Check if it's already a proper 2D list
+                            if actual and isinstance(actual[0], (list, tuple)):
+                                act_list = actual
+                            else:
+                                # 1D list, wrap it
+                                act_list = [actual]
+                        else:
+                            # Try to convert iterable to list
+                            act_list = [list(row) for row in actual]
+                        
+                        # Only create diff_grid if dimensions match
+                        if act_list:
+                            exp_h, exp_w = len(exp_list), len(exp_list[0]) if exp_list else 0
+                            act_h, act_w = len(act_list), len(act_list[0]) if act_list else 0
+                            
+                            if exp_h == act_h and exp_w == act_w:
+                                # Same dimensions - create diff grid
+                                diff_grid = []
+                                for i in range(exp_h):
+                                    diff_row = []
+                                    for j in range(exp_w):
+                                        if exp_list[i][j] != act_list[i][j]:
+                                            diff_row.append('x')
+                                        else:
+                                            diff_row.append(exp_list[i][j])
+                                    diff_grid.append(diff_row)
                     
-                    # Check dimensions
-                    exp_h, exp_w = len(exp_list), len(exp_list[0]) if exp_list else 0
-                    act_h, act_w = len(act_list), len(act_list[0]) if act_list else 0
-                    
-                    if exp_h == act_h and exp_w == act_w:
-                        # Same dimensions - create diff grid
-                        diff_grid = []
-                        for i in range(exp_h):
-                            diff_row = []
-                            for j in range(exp_w):
-                                if exp_list[i][j] != act_list[i][j]:
-                                    diff_row.append('x')  # Mark difference
-                                else:
-                                    diff_row.append(exp_list[i][j])  # Keep original
-                            diff_grid.append(diff_row)
-                    # else: shapes mismatch, diff_grid stays None
+                    except (TypeError, AttributeError, IndexError, ValueError) as e:
+                        # Handle any conversion errors - just log the failure
+                        act_list = None
                 
-                error_details.append((idx, exp_list, act_list if actual is not None else None, diff_grid))
+                error_details.append((idx, exp_list, act_list, diff_grid))
         
         return error_details
     
@@ -315,7 +334,7 @@ def select_best_programs(candidate_programs, task, task_id,
     for k, (program, hypothesis, validation, sample_idx) in enumerate(
         zip(candidate_programs, hypotheses, validations, sample_indices)):
         
-        if not program:
+        if not program or len(program.strip()) == 0:
             all_sample_scores.append((sample_idx, 0.0, None, "extraction_failed"))
             continue
         
@@ -420,7 +439,7 @@ def select_best_programs(candidate_programs, task, task_id,
         f.write(f"{'-'*80}\n\n")
         
         if selected_sample_idx >= 0:
-            f.write(f"SELECTED: Sample {selected_sample_idx} (Test Score: {best_test_score:.2f})\n")
+            f.write(f"SELECTED: Sample {selected_sample_idx} (Test Score: {final_score:.2f})\n")
         else:
             f.write(f"SELECTED: Library fallback (Score: {final_score:.2f})\n")
         f.write(f"{'-'*80}\n\n")
@@ -754,16 +773,21 @@ Combat this by evolving your hypothesis."""
         
         # Build repair prompts if needed
         if program_repair_enabled and result.score < 1.0 and metadata and metadata['best_program']:
-            _, diff, _, diff2 = get_program_errors(
+            if metadata['second_best_program'] is None:
+                metadata['second_best_program'] = metadata['best_program']
+            results1, diff, results2, diff2 = get_program_errors(
                 metadata['best_program'], metadata['second_best_program'], task, 'train'
             )
-            
+            # Calculate train scores
+            best_train_score = sum(1 for _, _, correct in results1 if correct) / len(results1) if results1 else 0.0
+            second_best_train_score = sum(1 for _, _, correct in results2 if correct) / len(results2) if results2 else 0.0
+
             for k in range(k_samples):
                 if validations[k] != None:
                     validated_pattern = extract_validated_pattern_from_response(validations[k])
                 repair_prompt = prompter.build_2d_prompt(
-                    task, metadata['best_program'], diff,
-                    metadata['second_best_program'], diff2,
+                    task, metadata['best_program'], best_train_score, diff,
+                    metadata['second_best_program'], second_best_train_score, diff2,
                     dsl_enabled=dsl_enabled, validated_pattern=validated_pattern
                 )
                 repair_prompts.append(repair_prompt)

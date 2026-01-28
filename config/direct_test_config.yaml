@@ -1,0 +1,22 @@
+provider: "grok"  # or "qwen", "gemini"
+
+model:
+  name: "x-ai/grok-4.1-fast"
+  api_base: "https://openrouter.ai/api/v1"
+
+test_direct:
+  data_dir: "data_v2/evaluation"
+  cache_path: "cache/phase1_simTrue_libformatted_solutions_solvers.json"
+  
+  # Experiment configuration
+  exp: true  # Set to true to use experience
+  use_programs: true  # Include similar program code (requires exp=true)
+  use_images: true  # Include similar task images (requires exp=true)
+  
+  # API configuration
+  max_tokens: 32000
+  max_retries: 3
+  max_api_calls: 400
+  
+  # Logging
+  verbose: true

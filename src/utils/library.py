@@ -14,9 +14,11 @@ import multiprocessing as mp
 from functools import partial
 from typing import List, Dict, Set, Tuple, Any
 
+# import ast
+import importlib
 from utils.dsl import *
 from utils.constants import *
-from . import solvers
+# from . import solvers
 
 
 def pad_grid(grid,height, width, fill):
@@ -184,7 +186,7 @@ def evaluate_single_program(prog_data: Tuple, train_examples: List[Dict], min_si
     Must be a module-level function for multiprocessing.
     
     Args:
-        prog_data: Tuple of (task_id, solve_func, functions)
+        prog_data: Tuple of (task_id, functions, source_module)
         train_examples: List of training examples
         min_similarity: Minimum similarity threshold
         timeout: Timeout per execution in seconds
@@ -192,7 +194,28 @@ def evaluate_single_program(prog_data: Tuple, train_examples: List[Dict], min_si
     Returns:
         Dict with program results or None if below threshold
     """
-    task_id, solve_func, functions = prog_data
+    import importlib
+    import inspect
+    
+    task_id, functions, source_module = prog_data
+    
+    # Re-import the function in this worker process (avoids pickling issues)
+    try:
+        module = importlib.import_module(f"utils.{source_module}")
+        solve_func = getattr(module, f"solve_{task_id}")
+    except Exception as e:
+        return {
+            'program': '',
+            'task_id': task_id,
+            'source_module': source_module,
+            'similarity': 0.0,
+            'example_scores': [],
+            'errors': len(train_examples),
+            'error_messages': [f"Failed to import: {e}"],
+            'functions': functions,
+            'has_perfect_example': False,
+            'above_threshold': False
+        }
     
     similarities = []
     error_count = 0
@@ -202,6 +225,11 @@ def evaluate_single_program(prog_data: Tuple, train_examples: List[Dict], min_si
     for example in train_examples:
         input_grid = example['input']
         expected_output = example['output']
+        
+        # Handle formatted_solutions: convert tuple to list of lists
+        if source_module == "formatted_solutions":
+            if isinstance(input_grid, tuple):
+                input_grid = [list(row) for row in input_grid]
         
         output, error = execute_program_safely(solve_func, input_grid, timeout_seconds=timeout)
         
@@ -217,7 +245,7 @@ def evaluate_single_program(prog_data: Tuple, train_examples: List[Dict], min_si
     
     avg_similarity = sum(similarities) / len(similarities) if similarities else 0.0
     
-    # Return results even if below threshold for debugging
+    # Get source code
     try:
         source = inspect.getsource(solve_func)
     except:
@@ -226,48 +254,138 @@ def evaluate_single_program(prog_data: Tuple, train_examples: List[Dict], min_si
     return {
         'program': source,
         'task_id': task_id,
+        'source_module': source_module,
         'similarity': avg_similarity,
         'example_scores': similarities,
         'errors': error_count,
-        'error_messages': errors_list[:1] if errors_list else [],  # Keep first error for debugging
+        'error_messages': errors_list[:1] if errors_list else [],
         'functions': functions,
         'has_perfect_example': has_perfect,
         'above_threshold': avg_similarity >= min_similarity
     }
 
+def get_source_with_imports(func) -> str:
+    """
+    Get function source with only the imports immediately before it 
+    (between this function and the previous one).
+    """
+    try:
+        func_src = inspect.getsource(func)
+    except Exception:
+        return ""
+    
+    try:
+        module = inspect.getmodule(func)
+        module_src = inspect.getsource(module)
+        lines = module_src.splitlines()
+        
+        # Find the line number where this function starts
+        func_line = inspect.getsourcelines(func)[1]
+        
+        # Find the previous function's end line by scanning backwards
+        prev_func_end = 0
+        for i in range(func_line - 2, -1, -1):
+            stripped = lines[i].strip()
+            if stripped and not stripped.startswith('#'):  # Non-empty, non-comment line
+                prev_func_end = i
+                break
+        
+        # Extract import lines between previous function and current function
+        import_lines = []
+        for i in range(prev_func_end + 1, func_line):
+            stripped = lines[i].strip()
+            if stripped.startswith('import ') or stripped.startswith('from '):
+                import_lines.append(lines[i])
+        
+        import_block = "\n".join(import_lines)
+    except Exception:
+        import_block = ""
+    
+    if import_block:
+        return f"{import_block}\n\n{func_src}"
+    return func_src
+
+def source_programs(
+    similar_programs: List[Dict],
+    task_data_root: str = "data_v1/training"
+) -> List[Dict]:
+    """
+    Load task JSONs for similar programs and attach train examples.
+    
+    Args:
+        similar_programs: List of dicts with 'task_id', 'program', 'similarity', etc.
+        task_data_root: Root directory containing task JSONs
+    
+    Returns:
+        Same list with 'train_examples' added to each entry (if file exists)
+    """
+    from pathlib import Path
+    import json
+    
+    if not similar_programs:
+        return similar_programs
+    
+    for prog in similar_programs:
+        task_id = prog.get('task_id')
+        
+        if not task_id:
+            continue
+        source_module = prog.get('source_module','unknown')
+        if source_module == 'solvers':
+            task_file = Path(task_data_root) / f"{task_id}.json"
+            if task_file.exists():
+                try:
+                    with open(task_file, 'r') as f:
+                        task_data = json.load(f)
+                    prog['train_examples'] = task_data.get('train', [])
+                except Exception as e:
+                    prog['train_examples'] = []
+            else:
+                prog['train_examples'] = []
+        
+    return similar_programs
+
 
 class ProgramLibrary:
     """Storage and retrieval of solved ARC programs with execution-based similarity"""
     
-    def __init__(self):
+    def __init__(self, module_names: List[str] = ['solvers', 'formatted_solutions']):
         """Initialize program library by loading solvers from solvers.py"""
+        allowed_modules = {'solvers', 'formatted_solutions'}
+        selected = list(allowed_modules) if module_names is None else [m for m in module_names if m in allowed_modules]
         self.programs = []
-        self._load_solvers_from_module()
+        self.module_names = selected
+        if not self.module_names:
+            print("WARNING: No valid module names provided for ProgramLibrary!", flush=True)
+        for module_name in self.module_names:
+            self._load_module(module_name)
     
-    def _load_solvers_from_module(self):
-        """Load all solve_* functions from solvers.py"""
+    def _load_module(self, module_name: str):
+        """Load all solve_* functions from a module."""
         try:
-            from . import solvers
-            
-            for name, obj in inspect.getmembers(solvers):
-                if name.startswith('solve_') and callable(obj):
-                    task_id = name.replace('solve_', '')
-                    
-                    try:
-                        source = inspect.getsource(obj)
-                        functions = extract_functions(source)
-                        
-                        self.programs.append({
-                            'task_id': task_id,
-                            'solve_func': obj,
-                            'functions': functions
-                        })
-                    except Exception as e:
-                        print(f"DEBUG: Failed to add {name}: {e}", flush=True)
-                        
+            module = importlib.import_module(f".{module_name}", package=__package__)
         except Exception as e:
-            print(f"DEBUG: Failed to import solvers: {e}", flush=True)
-    
+            print(f"DEBUG: Failed to import {module_name}: {e}", flush=True)
+            return
+        
+        for name, obj in inspect.getmembers(module):
+            if name.startswith("solve_") and callable(obj):
+                task_id = name.replace("solve_", "")
+                try:
+                    source = get_source_with_imports(obj)
+                    functions = extract_functions(source)
+                    
+                    # Store original function - no wrapping (avoids pickling issues)
+                    self.programs.append({
+                        'task_id': task_id,
+                        'solve_func': obj,  # Keep for backward compatibility
+                        'functions': functions,
+                        'source': source,
+                        'source_module': module_name
+                    })
+                except Exception as e:
+                    print(f"DEBUG: Failed to add {module_name}.{name}: {e}", flush=True)
+
     def save(self, filepath: str):
         """Save library to disk (JSON format)."""
         data = []
@@ -280,7 +398,8 @@ class ProgramLibrary:
             data.append({
                 'task_id': prog['task_id'],
                 'code': source,
-                'functions': list(prog['functions'])
+                'functions': list(prog['functions']),
+                'source_module': prog.get('source_module', 'unknown')
             })
         
         with open(filepath, 'w') as f:
@@ -289,7 +408,8 @@ class ProgramLibrary:
     def load(self, filepath: str = None):
         """Reload solvers from solvers.py"""
         self.programs.clear()
-        self._load_solvers_from_module()
+        for module_name in self.module_names:
+            self._load_module(module_name)
     
     def add(self, task_id: str, program_source: str):
         """
@@ -348,7 +468,7 @@ class ProgramLibrary:
         
         # Prepare program data for parallel processing
         prog_data_list = [
-            (prog['task_id'], prog['solve_func'], prog['functions'])
+            (prog['task_id'], prog['functions'], prog.get('source_module', 'unknown'))
             for prog in self.programs
         ]
         
@@ -392,6 +512,9 @@ class ProgramLibrary:
                     result = future.result(timeout=timeout + 1)  # Slightly longer than execution timeout
                     
                     if result is not None:
+                        if 'functions' in result and isinstance(result['functions'], set):
+                            result['functions'] = list(result['functions'])
+                            
                         all_results.append(result)
                         
                         if result['above_threshold']:
@@ -451,19 +574,39 @@ class ProgramLibrary:
         print(f"Other programs above threshold: {len(other_programs)}", flush=True)
         
         # Return all perfect programs + top_k others
-        if perfect_programs:
-            result = perfect_programs + other_programs[:top_k]
-        else:
-            result = other_programs[:top_k]
+        from collections import defaultdict
+        perfect_by_module = defaultdict(list)
+        other_by_module = defaultdict(list)
         
-        print(f"Returning {len(result)} programs", flush=True)
-        if len(result) > 0:
-            print(f"Top program: {result[0]['task_id']} (sim: {result[0]['similarity']:.3f})", flush=True)
-            if len(result) > 1:
-                print(f"Second program: {result[1]['task_id']} (sim: {result[1]['similarity']:.3f})", flush=True)
+        # Group perfect programs
+        for prog in perfect_programs:
+            module = prog.get('source_module', 'unknown')
+            perfect_by_module[module].append(prog)
         
+        # Group other programs
+        for prog in other_programs:
+            module = prog.get('source_module', 'unknown')
+            other_by_module[module].append(prog)
+        
+        # Select top_k from each module
+        result = []
+        all_modules = set(perfect_by_module.keys()) | set(other_by_module.keys())
+        for module_name in sorted(all_modules):
+            perfect_progs = perfect_by_module.get(module_name, [])
+            other_progs = other_by_module.get(module_name, [])
+            
+            # Take ALL perfect programs
+            selected_perfect = perfect_progs
+            # Take top_k from non-perfect programs
+            selected_other = other_progs[:top_k]
+            
+            selected = selected_perfect + selected_other
+            result.extend(selected)
+            
+            print(f"Module '{module_name}': {len(perfect_progs)} perfect + {len(other_progs)} other programs, "
+                f"selected {len(selected_perfect)} perfect + {len(selected_other)} other = {len(selected)} total", flush=True)
         return result
-    
+            
     def test_program(self, 
                     solve_func, 
                     train_examples: List[Dict[str, Any]],
@@ -522,6 +665,7 @@ class ProgramLibrary:
         return len(self.programs)
 
 
+    
 def format_similar_programs_for_prompt(similar_programs: List[Dict]) -> List[Dict[str, Any]]:
     """
     Format library matches for insertion into prompts.

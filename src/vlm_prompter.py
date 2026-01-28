@@ -13,7 +13,9 @@ class VLMPrompter:
     def build_phase2a_prompt(self, 
                              task: Dict[str, Any],
                              similar_programs: List[Dict[str, Any]] = None,
-                             dsl_enabled: bool = True) -> List[Dict[str, Any]]:
+                             dsl_enabled: bool = True,
+                             dsl_programs: bool = True,
+                             prog_2ab: bool = False) -> List[Dict[str, Any]]:
         """
         Build Phase 2A prompt: Hypothesis Formation from Training Only.
         """
@@ -27,26 +29,13 @@ class VLMPrompter:
         
         # Format training examples ONLY (with images)
         content_blocks.extend(self._format_training_examples(task['train']))
-
-        if dsl_enabled:  
-            # Add similar programs section
-            content_blocks.append({
-                "type": "text",
-                "text": "\n## Similar Programs for Reference.\nThe following programs solved similar tasks and may provide useful patterns or approaches:\n"
-            })
       
-            if similar_programs:
-                similar_str = self._format_similar_programs(similar_programs)
-            else:
-                similar_str = "[No similar programs found]"
-            
-            content_blocks.append({
-                "type": "text",
-                "text": similar_str
-            })
+        #Removed dsl-enabled check to always show similar programs, TODO: see later if this helps
+        if prog_2ab:
+            content_blocks.extend(self._format_similar_programs(similar_programs,  dsl_programs=dsl_programs))
         
         # Get template with dsl_enabled parameter
-        template = self._load_phase2a_template(dsl_enabled)
+        template = self._load_phase2a_template(dsl_enabled,prog_2ab)
         
         # Add the analysis protocol template (hypothesis formation)
         content_blocks.append({
@@ -60,7 +49,9 @@ class VLMPrompter:
                              task: Dict[str, Any],
                              hypothesis: str,
                              similar_programs: List[Dict[str, Any]] = None,
-                             dsl_enabled: bool = True) -> List[Dict[str, Any]]:
+                             dsl_enabled: bool = True,
+                             dsl_programs: bool = True,
+                             prog_2ab: bool = False) -> List[Dict[str, Any]]:
         """
         Build Phase 2B prompt: Hypothesis Validation with Training + Test.
         """
@@ -95,36 +86,76 @@ If it doesn't fit perfectly, identify what needs to be refined.
         })
         content_blocks.extend(self._format_training_examples(task['train'], include_images=True))
         
-        if dsl_enabled:
-            content_blocks.append({
-                "type": "text",
-                "text": "\n## Similar Programs for Reference\n"
-            })
-            
-            if similar_programs:
-                similar_str = self._format_similar_programs(similar_programs)
-            else:
-                similar_str = "[No similar programs found]"
-                
-            content_blocks.append({
-                "type": "text",
-                "text": similar_str
-            })
+        #Removed dsl-enabled check to always show similar programs, TODO: see later if this helps
+        if prog_2ab:
+            content_blocks.extend(self._format_similar_programs(similar_programs,  dsl_programs=dsl_programs))
         
+        # Get template with dsl_enabled parameter
+        template = self._load_phase2b_template()
+        
+    
         # Add validation template
         content_blocks.append({
             "type": "text",
-            "text": self.phase2b_template
+            "text": template
         })
         
         return content_blocks
+    
+    def build_phase2ab_combined_prompt(self,
+                                   task: Dict[str, Any],
+                                   similar_programs: List[Dict[str, Any]] = None,
+                                   dsl_enabled: bool = True,
+                                   dsl_programs: bool = True,
+                                   prog_2ab: bool = False) -> List[Dict[str, Any]]:
+        """
+        Build COMBINED Phase 2A+2B prompt: Hypothesis Formation AND Validation in one step.
+        Shows training examples, test examples, and asks model to form + validate hypothesis.
+        """
+        content_blocks = []
+        
+        # Add header
+        content_blocks.append({
+            "type": "text",
+            "text": "## Task Overview\n\nYou will analyze this ARC puzzle by:\n1. Forming a hypothesis from training examples\n2. Validating that hypothesis against test inputs\n\n"
+        })
+        
+        # Format training examples (with images)
+        content_blocks.append({
+            "type": "text",
+            "text": "## Training Examples\n"
+        })
+        content_blocks.extend(self._format_training_examples(task['train']))
+        
+        # Format test examples (inputs only, with images)
+        content_blocks.append({
+            "type": "text",
+            "text": "\n## Test Examples (to solve)\n"
+        })
+        content_blocks.extend(self._format_test_examples(task['test'], include_images=True))
+        
+        # Show similar programs
+        if prog_2ab:
+            content_blocks.extend(self._format_similar_programs(similar_programs, dsl_programs=dsl_programs))
+        
+        # Add the combined analysis template
+        template = self._load_phase2ab_combined_template(dsl_enabled, prog_2ab)
+        content_blocks.append({
+            "type": "text",
+            "text": template
+        })
+        
+        return content_blocks
+
+
     
     def build_phase2c_prompt(self,
                              task: Dict[str, Any], 
                              validated_pattern: str,
                              similar_programs: List[Dict[str, Any]] = None,
                              few_shot: bool = True,
-                             dsl_enabled: bool = True) -> List[Dict[str, Any]]:
+                             dsl_enabled: bool = True,
+                             dsl_programs: bool = True) -> List[Dict[str, Any]]:
         """
         Build Phase 2C prompt: Code Generation from Validated Pattern.
         """
@@ -160,31 +191,20 @@ If it doesn't fit perfectly, identify what needs to be refined.
             "text": f"\n## Natural Language Pattern Description\n{validated_pattern}\n"
         })
         
-        if dsl_enabled:
-            # Add similar programs section
-            content_blocks.append({
-                "type": "text",
-                "text": "\n## Similar Programs for Reference\nThe following programs solved similar tasks and may provide useful patterns or approaches:\n\n"
-            })
-            
-            if similar_programs:
-                similar_str = self._format_similar_programs(similar_programs)
-            else:
-                similar_str = "[No similar programs available for reference]"
-            
-            content_blocks.append({
-                "type": "text",
-                "text": similar_str
-            })
+        #Removed dsl-enabled check to always show similar programs, TODO: see later if this helps
+        content_blocks.extend(self._format_similar_programs(similar_programs,  dsl_programs=dsl_programs))
+        
+        # Get template with dsl_enabled parameter
+        template = self._get_phase2c_dsl_section(dsl_enabled)
         
         # Add DSL primitives or Python instructions (dynamically generated)
         content_blocks.append({
             "type": "text",
-            "text": self._get_phase2c_dsl_section(dsl_enabled)
+            "text": template
         })
         
         # Add few-shot examples only if DSL is enabled
-        if few_shot and dsl_enabled:
+        if few_shot:
             content_blocks.append({
                 "type": "text",
                 "text": self._get_phase2c_fewshot_section()
@@ -206,7 +226,8 @@ If it doesn't fit perfectly, identify what needs to be refined.
                         second_best_train_score: float,
                         diff_grid2: List[Tuple],
                         dsl_enabled: bool = True,
-                        validated_pattern = None) -> List[Dict[str, Any]]:
+                        validated_pattern = None,
+                        solved = False) -> List[Dict[str, Any]]:
         """
         Build 2D prompt: Single-step prompt for combined hypothesis formation and code generation.
         """
@@ -218,8 +239,18 @@ If it doesn't fit perfectly, identify what needs to be refined.
         
         content_blocks.append({
             "type": "text",
-            "text": "You are given a 2D ARC task with training and test samples. You are also given 2 programs that were generated in response to the ARC task and the hypothesis htey were generated in response to. However, they are incorrect and the hypothesis may also be incorrect. You are given the corresponding output of the incorrect programs and the difference with the actual output from the training samples if available. Your goal is to generate a Python `solve(I)` to solve these tasks."
+            "text": "You are given a 2D ARC task with training and test samples. You are also given 2 programs that were generated in response to the ARC task and the hypothesis they were generated in response to." 
         })
+        if solved:
+            content_blocks.append({
+                "type": "text",
+                "text": "At least one of these programs solves all training task. However, the hypothesis might be incorrect and/or the programs might not generalize to the test examples. Your goal is to generate a Python `solve(I)` that solves the test samples as well"
+            })
+        else:
+            content_blocks.append({
+                "type": "text",
+                "text": "However, they are incorrect and the hypothesis may also be incorrect. You are given the corresponding output of the incorrect programs and the difference with the actual output from the training samples if available. Your goal is to generate a Python `solve(I)` to solve these tasks."
+            })
         if dsl_enabled:
             content_blocks.append({
                 "type": "text",
@@ -291,7 +322,7 @@ If it doesn't fit perfectly, identify what needs to be refined.
         })
         
         return content_blocks
-    
+  
     def _format_test_examples(self, test_examples: List[Dict[str, Any]], include_images: bool = True) -> List[Dict[str, Any]]:
         """Format test examples as content blocks with images (input only, no output)"""
         content_blocks = []
@@ -393,33 +424,156 @@ If it doesn't fit perfectly, identify what needs to be refined.
     def _format_grid(self, grid: Union[Tuple[Tuple[int]], List[List]], separator: str = "|") -> str:
         return "\n".join(separator.join(str(cell) for cell in row) for row in grid)
     
-    def _format_similar_programs(self, similar_programs: List[Dict[str, Any]]) -> str:
-        """Format similar programs for pattern discovery and code generation"""
-        lines = []
-        lines.append("The following programs may be useful to solve the current task, feel free to use parts of each program, and/or combine them. Most importantly, use them as guidance:\n")
-        
-        for idx, prog in enumerate(similar_programs, 1):
-            similarity = prog.get('similarity', 0.0)
-            program_code = prog.get('program', '')
-            task_id = prog.get('task_id', 'unknown')
-            example_scores = prog.get('example_scores', [])
-            perfect_count = sum(1 for s in example_scores if s == 1.0)
-            total_examples = len(example_scores)
-            
-            lines.append(f"Similar Program {idx} (similarity: {similarity:.2f}, task: {task_id}):")
-            if total_examples > 0:
-                lines.append(f"# This program solved {perfect_count}/{total_examples} training examples perfectly.")
-            lines.append("```python")
-            lines.append(program_code)
-            lines.append("```")
-            lines.append("")
-        
-        return "\n".join(lines)
     
-    def _load_phase2a_template(self, dsl_enabled: bool = True) -> str:
+    def _format_similar_programs(self, similar_programs: List[Dict[str, Any]], dsl_programs: bool = True) -> List[Dict[str, Any]]:
+        """
+        Format similar programs as content blocks, grouped by source module.
+        - First shows all programs from 'solvers' (with source task images)
+        - Then shows all programs from 'formatted_solutions' (code only)
+        
+        Returns list of content block dicts (text and image blocks)
+        """
+        blocks = []
+        
+        if not similar_programs:
+            return blocks
+        
+        blocks.append({
+            "type": "text",
+            "text": "The following examples may be useful to solve the current task. Feel free to use parts of each program, combine them, or use them as guidance or take inspiration from similar images to learn underlying patterns:\n"
+        })
+        
+        # Separate programs by source module
+        solvers_programs = [p for p in similar_programs if p.get('source_module') == 'solvers']
+        formatted_programs = [p for p in similar_programs if p.get('source_module') == 'formatted_solutions']
+        other_programs = [p for p in similar_programs if p.get('source_module') not in ['solvers', 'formatted_solutions']]
+        
+        # Section 1: Solvers with source task examples and images
+        if solvers_programs and dsl_programs:
+            blocks.append({
+                "type": "text",
+                "text": f"\n## {len(solvers_programs)} programs written in a domain specific language with source task examples and visual references:\n"
+            })
+            
+            for idx, prog in enumerate(solvers_programs, 1):
+                similarity = prog.get('similarity', 0.0)
+                program_code = prog.get('program', '')
+                task_id = prog.get('task_id', 'unknown')
+                example_scores = prog.get('example_scores', [])
+                perfect_count = sum(1 for s in example_scores if s == 1.0)
+                total_examples = len(example_scores)
+                train_examples = prog.get('train_examples', None)
+                if total_examples > 0:
+                    # Header
+                    header_text = f"\n### Solver Program {idx}\n"
+                    header_text += f"- **Similarity**: {similarity:.2f}\n"
+                    # header_text += f"- **Source Task ID**: {task_id}\n"
+                    if total_examples > 0:
+                        header_text += f"- **Performance**: {perfect_count}/{total_examples} examples solved perfectly\n"
+                    
+                    blocks.append({"type": "text", "text": header_text})
+                    
+                    # Show source task images if available
+                    if train_examples:
+                        blocks.append({
+                            "type": "text",
+                            "text": f"\n**Source Task Examples (Task {task_id})**:\n"
+                        })
+                        blocks.extend(self._format_training_examples(train_examples, include_images=True))
+                    
+                    # Show program code
+                    blocks.append({
+                        "type": "text",
+                        "text": f"\n**Program Code**:\n```python\n{program_code}\n```\n"
+                    })
+        if solvers_programs and not dsl_programs:
+            blocks.append({
+                "type": "text",
+                "text": f"\n## {len(solvers_programs)} Reference Solutions with similarity scores:\n"
+            })
+            
+            for idx, prog in enumerate(solvers_programs, 1):
+                similarity = prog.get('similarity', 0.0)
+                program_code = prog.get('program', '')
+                task_id = prog.get('task_id', 'unknown')
+                example_scores = prog.get('example_scores', [])
+                perfect_count = sum(1 for s in example_scores if s == 1.0)
+                total_examples = len(example_scores)
+                train_examples = prog.get('train_examples', None)
+                if total_examples > 0:
+                    # Header
+                    header_text = f"\n### Reference Tasks {idx}\n"
+                    header_text += f"- **Similarity**: {similarity:.2f}\n"
+                    # header_text += f"- **Task ID**: {task_id}\n"
+                    # if total_examples > 0:
+                    #     header_text += f"- **Performance**: {perfect_count}/{total_examples} examples solved perfectly\n"
+                    header_text += f"\n*Note: This is a reference visual ARC task similar to the the current task.*\n"
+                    
+                    blocks.append({"type": "text", "text": header_text})
+                    
+                    #add images only
+                    if train_examples:
+                        # blocks.append({
+                        #     "type": "text",
+                        #     "text": f"\n**Source Task Examples (Task {task_id})**:\n"
+                        # })
+                        blocks.extend(self._format_training_examples(train_examples, include_images=True))              
+                
+        # Section 2: Formatted solutions (code only)
+        if formatted_programs:
+            blocks.append({
+                "type": "text",
+                "text": f"\n## {len(formatted_programs)} Reference Solutions with similarity scores:\n"
+            })
+            
+            for idx, prog in enumerate(formatted_programs, 1):
+                similarity = prog.get('similarity', 0.0)
+                program_code = prog.get('program', '')
+                task_id = prog.get('task_id', 'unknown')
+                example_scores = prog.get('example_scores', [])
+                perfect_count = sum(1 for s in example_scores if s == 1.0)
+                total_examples = len(example_scores)
+                
+                # Header
+                header_text = f"\n### Reference Program {idx}\n"
+                header_text += f"- **Similarity**: {similarity:.2f}\n"
+                header_text += f"- **Task ID**: {task_id}\n"
+                if total_examples > 0:
+                    header_text += f"- **Performance**: {perfect_count}/{total_examples} examples solved perfectly\n"
+                header_text += f"\n*Note: This is a reference solution program.*\n"
+                
+                blocks.append({"type": "text", "text": header_text})
+                
+                # Show program code only
+                blocks.append({
+                    "type": "text",
+                    "text": f"\n**Program Code**:\n```python\n{program_code}\n```\n"
+                })
+        
+        # Section 3: Other programs (if any)
+        if other_programs:
+            blocks.append({
+                "type": "text",
+                "text": f"\n## Other Programs\n{len(other_programs)} program(s) from other sources:\n"
+            })
+            
+            for idx, prog in enumerate(other_programs, 1):
+                similarity = prog.get('similarity', 0.0)
+                program_code = prog.get('program', '')
+                task_id = prog.get('task_id', 'unknown')
+                source_module = prog.get('source_module', 'unknown')
+                
+                blocks.append({
+                    "type": "text",
+                    "text": f"\n### Program {idx} (source: {source_module})\n- **Similarity**: {similarity:.2f}\n- **Task ID**: {task_id}\n\n```python\n{program_code}\n```\n"
+                })
+        
+        return blocks
+    
+    def _load_phase2a_template(self, dsl_enabled: bool = True, prog_2ab: bool = False) -> str:
         """Template for hypothesis formation (training only)"""
         
-        if dsl_enabled:
+        if dsl_enabled or prog_2ab:
             intro = "\n## Analysis Protocol\n\nThe similar programs shown above may provide useful patterns, but focus primarily on understanding the transformation through the training examples.\n\n"
         else:
             intro = "\n## Analysis Protocol\n\n"
@@ -518,22 +672,123 @@ Does the hypothesis make sense for Test Input N?
 Does it explain all the test and training examples perfectly?
 
 **Final Validation:**
-<validated_pattern>
 After checking all examples:
 
 **Status:** [CONFIRMED / NEEDS REFINEMENT]
-
+<validated_pattern>
 **Final Pattern Description:**
 [If confirmed: restate the pattern cleanly]
 [If refined: provide the improved pattern with explanations of what changed]
 
-**Confidence:** [0-100%]
-
 **Reasoning:** [Why this pattern works for all examples]
 
+</validated_pattern>
+
+**Confidence:** [0-100%]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Begin validation:"""
+
+
+
+    def _load_phase2ab_combined_template(self, dsl_enabled: bool = True, prog_2ab: bool = False) -> str:
+        """
+        Combined template for hypothesis formation AND validation.
+        Maintains XML tag structure for existing extraction functions.
+        """
+        
+        if dsl_enabled or prog_2ab:
+            intro = "\n## Analysis Protocol\n\nThe similar programs shown above may provide useful patterns, but focus primarily on understanding the transformation through the examples.\n\n"
+        else:
+            intro = "\n## Analysis Protocol\n\n"
+        
+        body = """You will analyze the examples systematically, forming and validating your hypothesis in one process.
+
+    **Core principle:** Look for DIFFERENCES within each example (input→output changes) and SIMILARITIES across all examples (the consistent pattern).
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    ## PART 1: HYPOTHESIS FORMATION (from training examples)
+
+    Work through training examples sequentially, reasoning in simple English about what you observe.
+
+    **Step 1: First Training Example Analysis**
+    <observation_1>
+    Describe what you see:
+    - What's the size/shape change?
+    - What colors changed? 
+    - What geometric transformations occurred?
+    - What patterns do you notice?
+    </observation_1>
+
+    <hypothesis_1>
+    State your initial guess about the transformation rule in natural language.
+    </hypothesis_1>
+
+    **Step 2: Second Training Example Validation**
+    <observation_2>
+    - Does your hypothesis from Example 1 still hold?
+    - What's similar to Example 1? 
+    - What's different from Example 1?
+    </observation_2>
+
+    <hypothesis_2>
+    Refine your hypothesis:
+    - If it still works: Confirm and strengthen
+    - If it breaks: Revise with a more general pattern
+    </hypothesis_2>
+
+    **Continue for all training examples...**
+
+    **Pattern Synthesis from Training:**
+    <pattern_summary>
+    Based on training examples, the transformation rule is:
+    - [Short description of relevant observations]
+    - [First operation in natural language]
+    - [Second operation in natural language]
+    - [Any conditions or special cases]
+
+    Confidence level: [0-100%]
+    </pattern_summary>
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    ## PART 2: HYPOTHESIS VALIDATION (against test inputs)
+
+    Now check if your pattern works for the test inputs.
+
+    **For each test input:**
+    <test_check_1>
+    Does the pattern make sense for Test Input 1?
+    - Consider: size, colors, patterns, edge cases
+    - Any concerns or refinements needed?
+    </test_check_1>
+
+    <test_check_2>
+    Does the pattern make sense for Test Input 2?
+    - Any adjustments needed?
+    </test_check_2>
+
+    **Continue for all test inputs...**
+
+    **Final Validation:**
+    After checking all test inputs:
+
+    **Status:** [CONFIRMED / NEEDS REFINEMENT]
+
+    <validated_pattern>
+    **Final Pattern Description:**
+    [If confirmed: restate the pattern cleanly]
+    [If refined: provide the improved pattern with explanations of what changed]
+
+    **Reasoning:** [Why this pattern works for all examples (training + test)]
+
+    **Confidence:** [0-100%]
+    </validated_pattern>
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Begin your analysis:"""
+        
+        return intro + body
     
     def _get_phase2c_dsl_section(self, dsl_enabled: bool = True) -> str:
         """Phase 2C: DSL Primitives and Code Generation Instructions"""
@@ -770,7 +1025,7 @@ def solve(I):
 ## Approach
 Think about the transformation step-by-step:
 1. Analyze the input grid structure
-2. Identify the pattern/transformation rule
+2. Identify the pattern/transformation rule, you can use the reasoning from the hypothesis and learn from the programs provided
 3. Implement the logic to apply this transformation
 4. Return the output grid in the same tuple-of-tuples format
 

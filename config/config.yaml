@@ -4,12 +4,18 @@ provider: "grok"  # Options: "grok", "qwen", "gemini"
 
 # Model Configuration
 model:
-  name: "x-ai/grok-4.1-fast"
+  name: "google/gemini-3-flash-preview"
+   #x-ai/grok-4-fast
   api_base: "https://openrouter.ai/api/v1"
 
 # VLM Configuration
 vlm_config:
   phase1:
+    model: "openai/gpt-5.2" 
+    #x-ai/grok-4.1-fast 
+    # Optional override google/gemini-3-flash-preview
+    api_base: "https://openrouter.ai/api/v1" 
+    # Optional override
     max_tokens: 32000
     max_retries: 3
     save_prompts: false
@@ -19,6 +25,10 @@ vlm_config:
         enabled: true
 
   phase2:
+    model: "x-ai/grok-4.1-fast"  
+    # Optional override
+    api_base: "https://openrouter.ai/api/v1" 
+    # Optional override
     max_tokens: 32000
     max_retries: 3
     extra_params:
@@ -28,18 +38,27 @@ vlm_config:
 # Process Directory Parameters
 process_directory:
   data_dir: "data_v2/evaluation"
+  cache_dir: "cache/"
   timeout: 5
   k_samples: 4
   max_find_similar_workers: 56
-  log_dir: "testingv2_repair"
+  log_dir: "testingv2_flash"
   verbose: true
   similar: true
   few_shot: true
-  dsl_enabled: true
+  dsl_enabled: false
   program_repair_enabled: true
   max_api_calls: 400
+  training_repair: false
+  dsl_programs: false
+  phase2ab: false
+  prog_2ab: true
+  library:
+    - solvers            
+    - formatted_solutions  
+# options: solvers, formatted_solutions; choose any subset or leave empty
 
 # Output Configuration
 output:
-  results_dir: "results/testingv2_repair"
+  results_dir: "results/testingv2_flash"
 #Without images, With program refinement, switch to openrouter, core concepts as language, core concepts of this solution as library,  

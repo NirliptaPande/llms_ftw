@@ -224,6 +224,8 @@ def get_program_errors(best_program_code: str, second_best_program_code: str, ta
 
 def extract_code_from_response(response: str) -> Optional[str]:
     """Extract Python code from LLM response."""
+    if not response:
+        return None
     python_blocks = re.findall(r'```python\n(.*?)```', response, re.DOTALL)
     
     if python_blocks:
@@ -508,6 +510,21 @@ def select_best_programs(candidate_programs, task, task_id,
     
     return result
 
+
+# ── New helper function (add to pipeline.py) ──────────────────────────────
+
+def is_response_complete(output: str, required_tags: List[str]) -> bool:
+    """
+    Returns True only if output is non-empty AND every required XML tag
+    has a corresponding closing tag present.
+    """ #TODO: Change this to give an okayish not complete if it has some content and at least some tags, even if not all are closed. We don't want to throw away partially useful outputs.
+    if not output or not output.strip():
+        return False
+    for tag in required_tags:
+        if f"<{tag}>" in output and f"</{tag}>" not in output:
+            return False
+    return True
+    
 def process_directory(
     data_dir: str,
     cache_dir: str,
@@ -530,33 +547,19 @@ def process_directory(
     phase2ab: bool = True,
     prog_2ab: bool = False
 ) -> List[TaskResult]:
-    """
-    Process all tasks with fully batched API calls and K-sample diversity.
-    
-    Strategy:
-    1. Run find_similar in parallel for all tasks (only if dsl_enabled)
-    2. For each task, generate K samples:
-       - Batch ALL phase2a prompts (K per task) → send in parallel
-       - Batch ALL phase2b prompts (K per task) → send in parallel
-       - Batch ALL phase2c prompts (K per task) → send in parallel
-    3. Test all K programs per task and select the best (test=False if repair enabled)
-    4. Repair (if enabled): For tasks that failed/need repair, generate repair programs
-    5. Re-select with test=True for final evaluation
-    """
     data_path = Path(data_dir)
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    
+
     if not data_path.exists():
         print(f"Error: Directory not found: {data_dir}", flush=True)
         return []
-    
+
     json_files = sorted(data_path.glob('*.json'))
-    
     if not json_files:
         print(f"No JSON files found in {data_dir}", flush=True)
         return []
-    
+
     if verbose:
         print(f"\n{'='*80}", flush=True)
         mode = "DSL" if dsl_enabled else "Pure Python"
@@ -565,8 +568,7 @@ def process_directory(
         print(f"Total tasks: {len(json_files)}", flush=True)
         print(f"Total API calls per phase: {len(json_files)} × {k_samples}", flush=True)
         print(f"{'='*80}\n", flush=True)
-    
-    # Load all tasks
+
     tasks_data = []
     for task_file in json_files:
         task_id = task_file.stem
@@ -577,33 +579,34 @@ def process_directory(
             tasks_data.append((task_id, task))
         except Exception as e:
             print(f"✗ {task_id}: {e}", flush=True)
-    
+
     if verbose:
         print(f"Loaded {len(tasks_data)} tasks\n", flush=True)
-    
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
-    
-    # ========================================================================
-    # PHASE 1: Find similar (parallel) - ONLY IF DSL ENABLED
-    # ========================================================================
 
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+
+    # ── Phase status tracking ──────────────────────────────────────────────
+    # phase_status[task_idx][k] = {'2a': bool, '2b': bool, '2c': bool}
+    phase_status = [
+        [{'2a': False, '2b': False, '2c': False} for _ in range(k_samples)]
+        for _ in range(len(tasks_data))
+    ]
+
+    # ======================================================================
+    # PHASE 1
+    # ======================================================================
     phase1_results = [None] * len(tasks_data)
     phase1_cache = load_phase1_cache(cache_dir, similar, library.module_names)
-
     cache_hits = 0
     cache_misses = 0
-    
+
     time_start = time.time()
     for idx, (task_id, task) in enumerate(tasks_data):
-        # Create cache key
         cache_key = create_phase1_cache_key(task_id, task, similar, library.module_names)
-        
-        # Check cache first
         if cache_key in phase1_cache:
             cached_data = phase1_cache[cache_key]
             result = Phase1Result(
-                task_id=task_id,
-                task=task,
+                task_id=task_id, task=task,
                 similar_programs=cached_data['similar_programs'],
                 best_library_score=cached_data['best_library_score'],
                 best_library_program=cached_data['best_library_program'],
@@ -613,17 +616,13 @@ def process_directory(
             phase1_results[idx] = result
             cache_hits += 1
         else:
-            # Run phase1
             result = phase1_find_similar(task, task_id, library, timeout, verbose, similar)
             from utils.library import source_programs
             result.similar_programs = source_programs(
-                result.similar_programs,
-                task_data_root="data_v1/training"
+                result.similar_programs, task_data_root="data_v1/training"
             )
             phase1_results[idx] = result
             cache_misses += 1
-            
-            # Add to cache
             phase1_cache[cache_key] = {
                 'similar_programs': result.similar_programs,
                 'best_library_score': result.best_library_score,
@@ -631,254 +630,290 @@ def process_directory(
                 'perfect_match_found': result.perfect_match_found,
                 'error': result.error
             }
-    
-    # Save updated cache
+
     if cache_misses > 0:
         save_phase1_cache(cache_dir, phase1_cache, similar, library.module_names)
-    
+
     time_phase1 = time.time()
     if verbose:
         print(f"Phase 1 complete: {time_phase1 - time_start:.1f}s", flush=True)
         print(f"  Cache hits: {cache_hits}, Cache misses: {cache_misses}\n", flush=True)
 
-    # ========================================================================
-    # PHASE 2A: Batch all prompts (K samples per task)
-    # ========================================================================
+    # ======================================================================
+    # PHASE 2A (or combined 2AB)
+    # ======================================================================
     if phase2ab:
         if verbose:
             print(f"Phase 2AB combined: Building prompts ({k_samples} samples per task)...", flush=True)
     else:
         if verbose:
             print(f"Phase 2A: Building prompts ({k_samples} samples per task)...", flush=True)
-        
+
     phase2a_prompts = []
-    phase2a_task_sample_pairs = []  # List of (task_idx, sample_idx)
+    phase2a_task_sample_pairs = []
     phase2a_indices = []
-    
-    # Initialize 2D results structure
     phase2a_results = [[None] * k_samples for _ in range(len(tasks_data))]
-    
+
     for idx, (task_id, task) in enumerate(tasks_data):
         phase1_result = phase1_results[idx]
-        
-        # Skip if we found perfect match or error
-        if phase1_result and (phase1_result.perfect_match_found or phase1_result.error):
-            continue
-        
+        # if phase1_result and (phase1_result.perfect_match_found or phase1_result.error):
+        #     continue
         phase2a_indices.append(idx)
-        
         for k in range(k_samples):
             similar_progs = phase1_result.similar_programs if phase1_result else None
             if phase2ab:
                 prompt = prompter.build_phase2ab_combined_prompt(
-                    task, 
-                    similar_progs,
-                    dsl_enabled=dsl_enabled,
-                    dsl_programs=dsl_programs,
-                    prog_2ab=prog_2ab
+                    task, similar_progs,
+                    dsl_enabled=dsl_enabled, dsl_programs=dsl_programs, prog_2ab=prog_2ab
                 )
             else:
-                prompt = prompter.build_phase2a_prompt(task, similar_progs, dsl_enabled=dsl_enabled, dsl_programs=dsl_programs, prog_2ab=prog_2ab)
+                prompt = prompter.build_phase2a_prompt(
+                    task, similar_progs,
+                    dsl_enabled=dsl_enabled, dsl_programs=dsl_programs, prog_2ab=prog_2ab
+                )
             phase2a_prompts.append(prompt)
             phase2a_task_sample_pairs.append((idx, k))
-                
+
     if verbose:
         print(f"Sending {len(phase2a_prompts)} prompts to API...", flush=True)
 
-    
-    phase2a_outputs = []
-    if phase2a_prompts and not phase2ab:
-        if dsl_enabled:
-            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. You are given several training examples of input-output pairs for a puzzle followed by a few similar examples along with similarity scores that might be useful as reference. Your task is to iteratively refine your hypothesis about the transformation pattern given the training examples. 
-            
-Remember: Your first hypothesis is sticky and excessively convincing to you.
-Combat this by evolving your hypothesis as you see each training example."""
+    if phase2a_prompts:
+        if phase2ab:
+            system_prompt = (
+                "You are an expert at analyzing ARC puzzles and discovering transformation patterns. "
+                "You are given several training examples of input-output pairs for a puzzle followed by "
+                "a few similar examples along with similarity scores that might be useful as reference. "
+                "Your task is to iteratively refine your hypothesis about the transformation pattern given "
+                "the training examples, and then validate your hypothesis against the test examples, "
+                "refining it further if necessary."
+                if dsl_enabled else
+                "You are an expert at analyzing ARC puzzles and discovering transformation patterns. "
+                "You are given several training examples of input-output pairs for a puzzle. "
+                "This is followed by a reasoning process where you iteratively refine your hypothesis "
+                "about the transformation pattern given the training examples, and then validate your "
+                "hypothesis against the test examples, refining it further if necessary."
+            )
         else:
-            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. You are given several training examples of input-output pairs for a puzzle. This is followed by a reasoning process where you iteratively refine your hypothesis about the transformation pattern given the training examples. 
-            
-Remember: Your first hypothesis is sticky and excessively convincing to you.
-Combat this by evolving your hypothesis as you see each training example."""
-    elif phase2ab and phase2a_prompts:
-        if dsl_enabled:
-            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. You are given several training examples of input-output pairs for a puzzle followed by a few similar examples along with similarity scores that might be useful as reference. Your task is to iteratively refine your hypothesis about the transformation pattern given the training examples, and then validate your hypothesis against the test examples, refining it further if necessary."""
-        else:
-            system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns. You are given several training examples of input-output pairs for a puzzle. This is followed by a reasoning process where you iteratively refine your hypothesis about the transformation pattern given the training examples, and then validate your hypothesis against the test examples, refining it further if necessary."""
-    with ThreadPoolExecutor(max_workers=min(max_api_calls, len(phase2a_prompts))) as executor:
+            system_prompt = (
+                "You are an expert at analyzing ARC puzzles and discovering transformation patterns. "
+                "You are given several training examples of input-output pairs for a puzzle followed by "
+                "a few similar examples along with similarity scores that might be useful as reference. "
+                "Your task is to iteratively refine your hypothesis about the transformation pattern "
+                "given the training examples.\n\nRemember: Your first hypothesis is sticky and excessively "
+                "convincing to you.\nCombat this by evolving your hypothesis as you see each training example."
+                if dsl_enabled else
+                "You are an expert at analyzing ARC puzzles and discovering transformation patterns. "
+                "You are given several training examples of input-output pairs for a puzzle. "
+                "This is followed by a reasoning process where you iteratively refine your hypothesis "
+                "about the transformation pattern given the training examples.\n\nRemember: Your first "
+                "hypothesis is sticky and excessively convincing to you.\nCombat this by evolving your "
+                "hypothesis as you see each training example."
+            )
+
+        with ThreadPoolExecutor(max_workers=min(max_api_calls, len(phase2a_prompts))) as executor:
             futures = [executor.submit(vlm_client_phase1.query, p, system_prompt) for p in phase2a_prompts]
             phase2a_outputs = [f.result() for f in futures]
-    
-    # Store outputs in 2D structure
-    for (task_idx, sample_idx), output in zip(phase2a_task_sample_pairs, phase2a_outputs):
-        phase2a_results[task_idx][sample_idx] = output
-        
-        task_id = tasks_data[task_idx][0]
-        if not phase2ab:
-            log_path = os.path.join(log_dir, f"{task_id}_sample{sample_idx}_phase2a_hypothesis.txt")
-        else:
-            log_path = os.path.join(log_dir, f"{task_id}_sample{sample_idx}_phase2ab_hypothesis_validation.txt")
-        if not phase2ab:
+
+        for (task_idx, sample_idx), output in zip(phase2a_task_sample_pairs, phase2a_outputs):
+            phase2a_results[task_idx][sample_idx] = output
+            succeeded = is_response_complete(output, ['pattern_summary'] if not phase2ab else ['validated_pattern'])
+            phase_status[task_idx][sample_idx]['2a'] = succeeded
+
+            task_id = tasks_data[task_idx][0]
+            label = "phase2ab_hypothesis_validation" if phase2ab else "phase2a_hypothesis"
+            log_path = os.path.join(log_dir, f"{task_id}_sample{sample_idx}_{label}.txt")
             with open(log_path, 'w') as f:
+                header = "PHASE 2AB" if phase2ab else "PHASE 2A"
                 f.write(f"Task ID: {task_id} (Sample {sample_idx}/{k_samples-1})\n{'='*80}\n")
-                f.write(f"PHASE 2A: HYPOTHESIS FORMATION\n{'='*80}\n\n")
-                f.write(output)
-        else:
-            with open(log_path, 'w') as f:
-                f.write(f"Task ID: {task_id} (Sample {sample_idx}/{k_samples-1})\n{'='*80}\n")
-                f.write(f"PHASE 2AB: HYPOTHESIS FORMATION & VALIDATION\n{'='*80}\n\n")
-                f.write(output)
+                f.write(f"{header}\n{'='*80}\n\n")
+                f.write(output or "[NO OUTPUT]")
+
     time_phase2a = time.time()
     print(f"Phase 2A complete: {time_phase2a - time_phase1:.1f}s\n", flush=True)
-        
-        # ========================================================================
-        # PHASE 2B: Batch all prompts (K samples per task)
-        # ========================================================================
+
+    # ======================================================================
+    # PHASE 2B
+    # ======================================================================
     if not phase2ab:
         if verbose:
             print(f"Phase 2B: Building prompts ({k_samples} samples per task)...", flush=True)
-        
+
         phase2b_prompts = []
         phase2b_task_sample_pairs = []
         phase2b_indices = phase2a_indices.copy()
-        
         phase2b_results = [[None] * k_samples for _ in range(len(tasks_data))]
-        
+
         for idx in phase2b_indices:
             task_id, task = tasks_data[idx]
             phase1_result = phase1_results[idx]
-            
             for k in range(k_samples):
-                hypothesis = extract_hypothesis_from_response(phase2a_results[idx][k])
                 similar_progs = phase1_result.similar_programs if phase1_result else None
-                prompt = prompter.build_phase2b_prompt(task, hypothesis, similar_progs, dsl_enabled=dsl_enabled, prog_2ab=prog_2ab)
+                # ── KEY CHANGE: pass None if 2A failed so build_phase2b_prompt
+                #    delegates to build_phase2ab_combined_prompt ──────────────
+                raw_2a = phase2a_results[idx][k]
+                hypothesis = (
+                    extract_hypothesis_from_response(raw_2a)
+                    if phase_status[idx][k]['2a'] else None
+                )
+                prompt = prompter.build_phase2b_prompt(
+                    task, hypothesis, similar_progs,
+                    dsl_enabled=dsl_enabled, prog_2ab=prog_2ab
+                )
                 phase2b_prompts.append(prompt)
                 phase2b_task_sample_pairs.append((idx, k))
-        
+
         if verbose:
             print(f"Sending {len(phase2b_prompts)} prompts to API...", flush=True)
-        
+
         phase2b_outputs = []
         if phase2b_prompts:
-            if dsl_enabled:
-                system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns.
-
-    You are given an initial hypothesis about the puzzle. If the hypothesis doesn't extend to the test input while explaining the training examples, refine it to create a more accurate hypothesis. Additionally, you are also given a few programs with similarity scores that you might find useful for reference.
-    Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple sequential transformation that applies to all samples, both training and test.
-    Combat this by evolving your hypothesis."""
-            else:
-                system_prompt = """You are an expert at analyzing ARC puzzles and discovering transformation patterns.
-
-    You are given an initial hypothesis about the puzzle. If the hypothesis doesn't extend to the test input while explaining the training examples, refine it to create a more accurate hypothesis that generalizes to the test inputs as well as the training examples.
-    Remember: Your first hypothesis is sticky and excessively convincing to you. The final transformation is a simple sequential transformation that applies to all samples, both training and test.
-    Combat this by evolving your hypothesis."""
-            
+            system_prompt = (#TODO: What if the initial hpothesis doesn't exist because 2A failed? We should make sure the prompt still makes sense in that case, maybe by having the build_phase2b_prompt give us a hint in the prompt about whether we have a hypothesis or not, and then adjusting the system prompt to account for that possibility. We don't want to throw away potentially useful 2B outputs just because 2A failed to give us a nice hypothesis to work with.
+                "You are an expert at analyzing ARC puzzles and discovering transformation patterns.\n\n"
+                "You are given an initial hypothesis about the puzzle. If the hypothesis doesn't extend "
+                "to the test input while explaining the training examples, refine it to create a more "
+                "accurate hypothesis. Additionally, you are also given a few programs with similarity "
+                "scores that you might find useful for reference.\nRemember: Your first hypothesis is "
+                "sticky and excessively convincing to you. The final transformation is a simple sequential "
+                "transformation that applies to all samples, both training and test.\nCombat this by "
+                "evolving your hypothesis."
+                if dsl_enabled else
+                "You are an expert at analyzing ARC puzzles and discovering transformation patterns.\n\n"
+                "You are given an initial hypothesis about the puzzle. If the hypothesis doesn't extend "
+                "to the test input while explaining the training examples, refine it to create a more "
+                "accurate hypothesis that generalizes to the test inputs as well as the training examples.\n"
+                "Remember: Your first hypothesis is sticky and excessively convincing to you. The final "
+                "transformation is a simple sequential transformation that applies to all samples, both "
+                "training and test.\nCombat this by evolving your hypothesis."
+            )
             with ThreadPoolExecutor(max_workers=min(max_api_calls, len(phase2b_prompts))) as executor:
                 futures = [executor.submit(vlm_client_phase1.query, p, system_prompt) for p in phase2b_prompts]
                 phase2b_outputs = [f.result() for f in futures]
-        
-        # Store outputs
+
         for (task_idx, sample_idx), output in zip(phase2b_task_sample_pairs, phase2b_outputs):
             phase2b_results[task_idx][sample_idx] = output
-            
+            succeeded = is_response_complete(output, ['validated_pattern'])
+            phase_status[task_idx][sample_idx]['2b'] = succeeded
+
             task_id = tasks_data[task_idx][0]
-            hypothesis = extract_hypothesis_from_response(phase2a_results[task_idx][sample_idx])
-            log_path = os.path.join(log_dir, f"{task_id}_sample{sample_idx}_phase2b_validation.txt")
+            # If 2A failed, this was actually a 2AB combined run
+            was_2ab_fallback = not phase_status[task_idx][sample_idx]['2a']
+            label = "phase2b_fallback_2ab" if was_2ab_fallback else "phase2b_validation"
+            log_path = os.path.join(log_dir, f"{task_id}_sample{sample_idx}_{label}.txt")
             with open(log_path, 'w') as f:
                 f.write(f"Task ID: {task_id} (Sample {sample_idx}/{k_samples-1})\n{'='*80}\n")
-                f.write(f"PHASE 2B: HYPOTHESIS VALIDATION\n{'='*80}\n\n")
-                f.write(f"INITIAL HYPOTHESIS:\n{'-'*80}\n{hypothesis}\n{'-'*80}\n\n")
-                f.write(f"VALIDATION OUTPUT:\n{'-'*80}\n{output}")
-        
+                f.write(f"PHASE 2B {'(2AB fallback)' if was_2ab_fallback else ''}\n{'='*80}\n\n")
+                if not was_2ab_fallback:# So phase 2a and 2b outputs are written together?
+                    hyp = extract_hypothesis_from_response(phase2a_results[task_idx][sample_idx])
+                    f.write(f"INITIAL HYPOTHESIS:\n{'-'*80}\n{hyp}\n{'-'*80}\n\n")
+                f.write(f"VALIDATION OUTPUT:\n{'-'*80}\n{output or '[NO OUTPUT]'}")
+
         time_phase2b = time.time()
         print(f"Phase 2B complete: {time_phase2b - time_phase2a:.1f}s\n", flush=True)
     else:
+        # phase2ab=True: 2A output IS the 2B output; mark 2b status same as 2a
         phase2b_results = phase2a_results
         phase2b_indices = phase2a_indices
+        for idx in range(len(tasks_data)):
+            for k in range(k_samples):
+                phase_status[idx][k]['2b'] = phase_status[idx][k]['2a']
         time_phase2b = time_phase2a
-    
-    # ========================================================================
-    # PHASE 2C: Batch all prompts (K samples per task)
-    # ========================================================================
+
+    # ======================================================================
+    # PHASE 2C
+    # ======================================================================
     if verbose:
         print(f"Phase 2C: Building prompts ({k_samples} samples per task)...", flush=True)
-    
+
     phase2c_prompts = []
     phase2c_task_sample_pairs = []
     phase2c_indices = phase2b_indices.copy()
-    
     phase2c_results = [[None] * k_samples for _ in range(len(tasks_data))]
+
     for idx in phase2c_indices:
         task_id, task = tasks_data[idx]
         phase1_result = phase1_results[idx]
-        
         for k in range(k_samples):
-            validated_pattern = extract_validated_pattern_from_response(phase2b_results[idx][k])
             similar_progs = phase1_result.similar_programs if phase1_result else None
+            has_2b = phase_status[idx][k]['2b']
+            has_2a = phase_status[idx][k]['2a']
+
+            # ── Determine pattern and its source ──────────────────────────
+            if has_2b:
+                pattern = extract_validated_pattern_from_response(phase2b_results[idx][k])
+                pattern_source = '2b'
+            elif has_2a:
+                pattern = extract_hypothesis_from_response(phase2a_results[idx][k])
+                pattern_source = '2a'
+            else:
+                pattern = None
+                pattern_source = 'none'
+
             prompt = prompter.build_phase2c_prompt(
-                task, 
-                validated_pattern, 
-                similar_progs,
+                task, pattern, similar_progs,
                 few_shot=few_shot,
                 dsl_enabled=dsl_enabled,
-                dsl_programs=dsl_programs
+                dsl_programs=dsl_programs,
+                pattern_source=pattern_source
             )
             phase2c_prompts.append(prompt)
             phase2c_task_sample_pairs.append((idx, k))
-    
+
     if verbose:
         print(f"Sending {len(phase2c_prompts)} prompts to API...", flush=True)
-    
+
     phase2c_outputs = []
     if phase2c_prompts:
-        if dsl_enabled:
-            system_prompt = """You are an expert at generating code using the given DSL primitives to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training and test examples and some similar programs you might find useful as reference. Generate a Python function `def solve(I):` that implements the described transformation using ONLY the provided DSL primitives. Ensure your code is syntactically correct and follows best practices."""
-        else:
-            system_prompt = """You are an expert at generating Python code to solve ARC puzzles. You are provided with a natural language description of the pattern to implement, as well as training and test examples. Generate a Python function `def solve(I):` that implements the described transformation using pure Python and standard libraries. Ensure your code is syntactically correct and follows best practices."""
-        
+        system_prompt = (
+            "You are an expert at generating code using the given DSL primitives to solve ARC puzzles. "
+            "You are provided with a natural language description of the pattern to implement, as well as "
+            "training and test examples and some similar programs you might find useful as reference. "
+            "Generate a Python function `def solve(I):` that implements the described transformation using "
+            "ONLY the provided DSL primitives. Ensure your code is syntactically correct and follows best practices."
+            if dsl_enabled else
+            "You are an expert at generating Python code to solve ARC puzzles. You are provided with a "
+            "natural language description of the pattern to implement, as well as training and test examples. "
+            "Generate a Python function `def solve(I):` that implements the described transformation using "
+            "pure Python and standard libraries. Ensure your code is syntactically correct and follows best practices."
+        )
         with ThreadPoolExecutor(max_workers=min(max_api_calls, len(phase2c_prompts))) as executor:
             futures = [executor.submit(vlm_client_phase2.query, p, system_prompt) for p in phase2c_prompts]
             phase2c_outputs = [f.result() for f in futures]
-    
-    # Store outputs
+
     for (task_idx, sample_idx), output in zip(phase2c_task_sample_pairs, phase2c_outputs):
         phase2c_results[task_idx][sample_idx] = output
-    
+        code = extract_code_from_response(output) if output else None
+        phase_status[task_idx][sample_idx]['2c'] = bool(code)
+
     time_phase2c = time.time()
     print(f"Phase 2C complete: {time_phase2c - time_phase2b:.1f}s\n", flush=True)
-    
-    # ========================================================================
-    # INITIAL SELECTION (test=False if repair enabled, test=True otherwise)
-    # ========================================================================
+
+    # ======================================================================
+    # INITIAL SELECTION
+    # ======================================================================
     if verbose:
         if program_repair_enabled:
             print(f"Initial selection (training only, selecting best of {k_samples})...", flush=True)
         else:
             print(f"Testing programs (selecting best of {k_samples})...", flush=True)
-    
-    # Store: (result, candidate_programs, hypotheses, validations, task_id, task)
+
     task_data_list = []
-    
+
     for idx, (task_id, task) in enumerate(tasks_data):
         phase1_result = phase1_results[idx]
-        
+
         if idx not in phase2c_indices:
             result = TaskResult(
-                task_id=task_id,
-                success=False,
-                score=0.0,
-                error="No code generated",
-                selected_sample_idx=-1,
-                second_best_sample_idx=-1
+                task_id=task_id, success=False, score=0.0,
+                error="No code generated", selected_sample_idx=-1, second_best_sample_idx=-1
             )
             task_data_list.append((result, None, None, None, task_id, task))
             continue
-        
-        # Extract k programs and their associated hypotheses/validations
+
         candidate_programs = [extract_code_from_response(phase2c_results[idx][k]) for k in range(k_samples)]
         hypotheses = [phase2a_results[idx][k] for k in range(k_samples)]
         validations = [phase2b_results[idx][k] for k in range(k_samples)]
         sample_indices = list(range(k_samples))
-        
-        # Initial selection: test=False if repair enabled, test=True otherwise
+
         result = select_best_programs(
             candidate_programs, task, task_id,
             hypotheses, validations, sample_indices,
@@ -886,198 +921,174 @@ Combat this by evolving your hypothesis as you see each training example."""
             program_repair_enabled=False,
             test=(not program_repair_enabled)
         )
-        
         task_data_list.append((result, candidate_programs, hypotheses, validations, task_id, task))
-    
+
     time_initial_selection = time.time()
     print(f"Initial selection complete: {time_initial_selection - time_phase2c:.1f}s\n", flush=True)
-    
-    # ========================================================================
-    # PHASE 2D: REPAIR (if enabled)
-    # ========================================================================
+
+    # ======================================================================
+    # PHASE 2D: REPAIR
+    # ======================================================================
     repair_prompts = []
-    repair_task_indices = []  # Maps repair_prompt index to task_data_list index
+    repair_task_indices = []
     repaired_count = 0
     time_phase2d = time_initial_selection
-    
     test_evaluated_tasks = set()
-    
+
     if program_repair_enabled:
         if verbose:
             print(f"Phase 2D: Building repair prompts ({k_samples} samples per task)...", flush=True)
-        
-        # Build repair prompts for tasks that need it
-        for task_idx, (result, candidate_programs, hypotheses, validations, task_id, task) in enumerate(task_data_list):
 
-            # Skip if no programs were generated or if already solved (unless training_repair is True)
-            if candidate_programs is None or result.program is None:
+        repair_meta = []
+
+        for task_idx, (result, candidate_programs, hypotheses, validations, task_id, task) in enumerate(task_data_list):
+            if candidate_programs is None:
                 continue
-            
+
             solved = result.score == 1.0
-            
             if not training_repair and solved:
                 continue
-            
-            # Get best and second_best programs using the indices
-            if result.selected_sample_idx < 0 or result.selected_sample_idx >= len(candidate_programs):
-                continue
-            
-            best_program = candidate_programs[result.selected_sample_idx]
-            
-            # Get second best program
-            if result.second_best_sample_idx >= 0 and result.second_best_sample_idx < len(candidate_programs):
-                second_best_program = candidate_programs[result.second_best_sample_idx]
-            else:
-                second_best_program = best_program  # Fallback
-            
-            # Get program errors
-            results1, diff, results2, diff2 = get_program_errors(
-                best_program, second_best_program, task, 'train'
-            )
-            
-            # Calculate train scores
-            best_train_score = sum(1 for _, _, correct in results1 if correct) / len(results1) if results1 else 0.0
-            second_best_train_score = sum(1 for _, _, correct in results2 if correct) / len(results2) if results2 else 0.0
-            
-            # Build k repair prompts, one for each validation
+
+            similar_progs = phase1_results[task_idx].similar_programs if phase1_results[task_idx] else None
+
             for k in range(k_samples):
-                if validations[k] is None:
-                    continue
-                
-                validated_pattern = extract_validated_pattern_from_response(validations[k])
-                repair_prompt = prompter.build_2d_prompt(
-                    task, best_program, best_train_score, diff,
-                    second_best_program, second_best_train_score, diff2,
-                    dsl_enabled=dsl_enabled, validated_pattern=validated_pattern, solved=solved
-                )
-                repair_prompts.append(repair_prompt)
-                repair_task_indices.append(task_idx)
-        
-        # Batch repair API calls
+                if not phase_status[task_idx][k]['2c']:
+                    # 2C failed for this sample: regen using best available hypothesis
+                    has_2b = phase_status[task_idx][k]['2b']
+                    has_2a = phase_status[task_idx][k]['2a']
+                    if has_2b:
+                        pattern = extract_validated_pattern_from_response(phase2b_results[task_idx][k])
+                        pattern_source = '2b'
+                    elif has_2a:
+                        pattern = extract_hypothesis_from_response(phase2a_results[task_idx][k])
+                        pattern_source = '2a'
+                    else:
+                        pattern = None
+                        pattern_source = 'none'
+                    prompt = prompter.build_phase2c_prompt(
+                        task, pattern, similar_progs,
+                        few_shot=few_shot, dsl_enabled=dsl_enabled,
+                        dsl_programs=dsl_programs, pattern_source=pattern_source
+                    )
+                    repair_meta.append(('regen_2c', task_idx, k))
+                else:
+                    # 2C succeeded: repair using this sample's own program and diff
+                    program_k = candidate_programs[k]
+                    if not program_k:
+                        continue
+                    results1, diff, results2, diff2 = get_program_errors(program_k, program_k, task, 'train')
+                    train_score = sum(1 for _, _, c in results1 if c) / len(results1) if results1 else 0.0
+                    validated_pattern = (
+                        extract_validated_pattern_from_response(validations[k])
+                        if validations[k] else None
+                    )
+                    prompt = prompter.build_2d_prompt(
+                        task, program_k, train_score, diff,
+                        program_k, train_score, diff2,
+                        dsl_enabled=dsl_enabled, validated_pattern=validated_pattern, solved=solved
+                    )
+                    repair_meta.append(('repair', task_idx, k))
+                repair_prompts.append(prompt)
+
         if repair_prompts:
             if verbose:
-                print(f"Sending {len(repair_prompts)} repair prompts to API...", flush=True)
-            
+                print(f"Sending {len(repair_prompts)} repair/regen prompts to API...", flush=True)
+
             with ThreadPoolExecutor(max_workers=min(max_api_calls, len(repair_prompts))) as executor:
                 futures = [executor.submit(vlm_client_phase2.query, p) for p in repair_prompts]
                 repair_outputs = [f.result() for f in futures]
-            
-            # Group repair outputs by task (k samples per task)
-            repairs_by_task = {}
-            for task_idx, output in zip(repair_task_indices, repair_outputs):
+
+            # Group outputs by task
+            repairs_by_task = {}  # task_idx -> list of (output, meta_type, k)
+            for (meta_type, task_idx, k), output in zip(repair_meta, repair_outputs):
                 if task_idx not in repairs_by_task:
                     repairs_by_task[task_idx] = []
-                repairs_by_task[task_idx].append(output)
-            
-            # Re-run selection with repaired programs (test=True for final evaluation)
+                repairs_by_task[task_idx].append((output, meta_type, k))
+
             if verbose:
-                print(f"Re-selecting with repaired programs (test evaluation)...", flush=True)
-            
-            for task_idx, repair_output_list in repairs_by_task.items():
+                print(f"Re-selecting with repaired/regenerated programs (test evaluation)...", flush=True)
+
+            for task_idx, output_list in repairs_by_task.items():
                 old_result, candidate_programs, hypotheses, validations, task_id, task = task_data_list[task_idx]
-                
-                # Extract repaired programs
-                repaired_programs = [extract_code_from_response(out) for out in repair_output_list]
-                
-                # Pad if we got fewer repairs than k_samples
+                repaired_programs = [None] * k_samples
+                # repaired_programs = [extract_code_from_response(out) for out, _, _ in output_list]
                 while len(repaired_programs) < k_samples:
                     repaired_programs.append(repaired_programs[-1] if repaired_programs else "")
-                
+
                 sample_indices = list(range(k_samples))
-                
-                # Re-run selection with test=True (final evaluation)
-                # Use ORIGINAL hypotheses and validations (not padded)
+
                 repaired_result = select_best_programs(
                     repaired_programs, task, task_id,
                     hypotheses, validations, sample_indices,
                     dsl_enabled, library, log_dir,
-                    program_repair_enabled=True,
-                    test=True
+                    program_repair_enabled=True, test=True
                 )
                 original_test_result = select_best_programs(
                     candidate_programs, task, task_id,
                     hypotheses, validations, sample_indices,
                     dsl_enabled, library, log_dir,
-                    program_repair_enabled=False,
-                    test=True
+                    program_repair_enabled=False, test=True
                 )
-                
-                # Update if repaired version is better
+
                 if repaired_result.score > original_test_result.score:
                     task_data_list[task_idx] = (repaired_result, repaired_programs, hypotheses, validations, task_id, task)
                     repaired_count += 1
                 else:
-                    # Keep old result but need to test it (if we didn't test initially)
-                    # Re-run with test=True
                     task_data_list[task_idx] = (original_test_result, candidate_programs, hypotheses, validations, task_id, task)
-                    
+
                 test_evaluated_tasks.add(task_idx)
-            
-            time_phase2d = time.time()
-            if verbose:
-                print(f"Repaired {repaired_count} programs", flush=True)
-                print(f"Phase 2D complete: {time_phase2d - time_initial_selection:.1f}s\n", flush=True)
+
+        time_phase2d = time.time()
+        if verbose:
+            print(f"Repaired/regenerated {repaired_count} tasks", flush=True)
+            print(f"Phase 2D complete: {time_phase2d - time_initial_selection:.1f}s\n", flush=True)
+
     if program_repair_enabled:
         if verbose:
             print(f"Evaluating remaining tasks on test set...", flush=True)
-        
         remaining_count = 0
         for task_idx, (result, candidate_programs, hypotheses, validations, task_id, task) in enumerate(task_data_list):
-            # Skip if already evaluated on test
             if task_idx in test_evaluated_tasks:
                 continue
-            
-            # Skip if no programs
             if candidate_programs is None or result.program is None:
                 continue
-            
-            # Evaluate on test
             sample_indices = list(range(k_samples))
             final_result = select_best_programs(
                 candidate_programs, task, task_id,
                 hypotheses, validations, sample_indices,
                 dsl_enabled, library, log_dir,
-                program_repair_enabled=False,
-                test=True
+                program_repair_enabled=False, test=True
             )
             task_data_list[task_idx] = (final_result, candidate_programs, hypotheses, validations, task_id, task)
             remaining_count += 1
-    
         if verbose and remaining_count > 0:
             print(f"Evaluated {remaining_count} additional tasks on test set\n", flush=True)
-    
-    # ========================================================================
-    # FINAL RESULTS AND STATISTICS
-    # ========================================================================
-    
+
+    # ======================================================================
+    # FINAL RESULTS
+    # ======================================================================
     results = []
     successful = 0
     total_score = 0.0
     sample_selection_counts = [0] * k_samples
-    
+
     for idx, (result, candidate_programs, hypotheses, validations, task_id, task) in enumerate(task_data_list):
-        # Track which sample was selected
         if candidate_programs and result.selected_sample_idx >= 0:
             sample_selection_counts[result.selected_sample_idx] += 1
-        
-        # Accumulate statistics
         if result.success:
             successful += 1
         total_score += result.score
         results.append(result)
-        
-        # Print progress
         if verbose:
             status = "✓" if result.success else "✗"
-            if result.selected_sample_idx >= 0:
-                sample_info = f"sample{result.selected_sample_idx}"
-            else:
-                sample_info = "no code" if not result.program else "library"
+            sample_info = (
+                f"sample{result.selected_sample_idx}" if result.selected_sample_idx >= 0
+                else ("no code" if not result.program else "library")
+            )
             print(f"{status} [{idx+1}/{len(task_data_list)}] {task_id}: {result.score:.2f} ({sample_info})", flush=True)
-    
+
     time_execution = time.time()
-    
-    # Summary
+
     print(f"\n{'='*80}", flush=True)
     print(f"TIME BREAKDOWN", flush=True)
     print(f"{'='*80}", flush=True)
@@ -1096,7 +1107,7 @@ Combat this by evolving your hypothesis as you see each training example."""
     print(f"SAMPLE SELECTION STATS", flush=True)
     print(f"{'='*80}", flush=True)
     for k in range(k_samples):
-        pct = 100 * sample_selection_counts[k] / len(tasks_data) if len(tasks_data) > 0 else 0
+        pct = 100 * sample_selection_counts[k] / len(tasks_data) if tasks_data else 0
         print(f"Sample {k} selected: {sample_selection_counts[k]} times ({pct:.1f}%)", flush=True)
     print(f"\n{'='*80}", flush=True)
     print(f"RESULTS", flush=True)

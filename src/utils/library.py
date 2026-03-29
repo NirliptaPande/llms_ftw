@@ -424,7 +424,8 @@ class ProgramLibrary:
         self.programs.append({
             'task_id': task_id,
             'solve_func': program_source,
-            'functions': functions
+            'functions': functions,
+            'source_module': source_module
         })
     
     def find_similar(self, 

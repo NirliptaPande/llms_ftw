@@ -46,60 +46,57 @@ class VLMPrompter:
         return content_blocks
     
     def build_phase2b_prompt(self,
-                             task: Dict[str, Any],
-                             hypothesis: str,
-                             similar_programs: List[Dict[str, Any]] = None,
-                             dsl_enabled: bool = True,
-                             dsl_programs: bool = True,
-                             prog_2ab: bool = False) -> List[Dict[str, Any]]:
+                         task: Dict[str, Any],
+                         hypothesis: str,          # may be None if 2A failed
+                         similar_programs: List[Dict[str, Any]] = None,
+                         dsl_enabled: bool = True,
+                         dsl_programs: bool = True,
+                         prog_2ab: bool = False) -> List[Dict[str, Any]]:
         """
         Build Phase 2B prompt: Hypothesis Validation with Training + Test.
+        If hypothesis is None (2A failed), delegates to build_phase2ab_combined_prompt.
         """
+        # 2A failed — run combined 2AB instead
+        if not hypothesis:
+            return self.build_phase2ab_combined_prompt(
+                task,
+                similar_programs,
+                dsl_enabled=dsl_enabled,
+                dsl_programs=dsl_programs,
+                prog_2ab=prog_2ab
+            )
+
+        # Normal 2B path (unchanged from original)
         content_blocks = []
-        
-        # Add the initial hypothesis
         content_blocks.append({
             "type": "text",
             "text": f"""## Initial Hypothesis
 
-{hypothesis}
+    {hypothesis}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-## All Examples (Test + Train)
+    ## All Examples (Test + Train)
 
-Your task: Test if this hypothesis works for test examples and train input output pairs below.
-If it doesn't fit perfectly, identify what needs to be refined.
+    Your task: Test if this hypothesis works for test examples and train input output pairs below.
+    If it doesn't fit perfectly, identify what needs to be refined.
 
-"""
+    """
         })
         content_blocks.append({
             "type": "text",
             "text": "\n### Test Examples (inputs only)\n"
         })
         content_blocks.extend(self._format_test_examples(task['test'], include_images=True))
-        
-        # Show ALL examples now (training + test)
         content_blocks.append({
             "type": "text",
             "text": "### Training Examples\n"
         })
         content_blocks.extend(self._format_training_examples(task['train'], include_images=True))
-        
-        #Removed dsl-enabled check to always show similar programs, TODO: see later if this helps
         if prog_2ab:
-            content_blocks.extend(self._format_similar_programs(similar_programs,  dsl_programs=dsl_programs))
-        
-        # Get template with dsl_enabled parameter
+            content_blocks.extend(self._format_similar_programs(similar_programs, dsl_programs=dsl_programs))
         template = self._load_phase2b_template()
-        
-    
-        # Add validation template
-        content_blocks.append({
-            "type": "text",
-            "text": template
-        })
-        
+        content_blocks.append({"type": "text", "text": template})
         return content_blocks
     
     def build_phase2ab_combined_prompt(self,
@@ -150,18 +147,24 @@ If it doesn't fit perfectly, identify what needs to be refined.
 
     
     def build_phase2c_prompt(self,
-                             task: Dict[str, Any], 
-                             validated_pattern: str,
-                             similar_programs: List[Dict[str, Any]] = None,
-                             few_shot: bool = True,
-                             dsl_enabled: bool = True,
-                             dsl_programs: bool = True) -> List[Dict[str, Any]]:
+                            task: Dict[str, Any],
+                            validated_pattern: str,        # may be None
+                            similar_programs: List[Dict[str, Any]] = None,
+                            few_shot: bool = True,
+                            dsl_enabled: bool = True,
+                            dsl_programs: bool = True,
+                            pattern_source: str = 'none'   # '2b', '2a', 'none'
+                            ) -> List[Dict[str, Any]]:
         """
         Build Phase 2C prompt: Code Generation from Validated Pattern.
+        pattern_source indicates where validated_pattern came from:
+        '2b'   -> normal validated pattern from phase 2b
+        '2a'   -> only hypothesis available (2b failed)
+        'none' -> neither 2a nor 2b succeeded, generate cold
         """
         content_blocks = []
-        
-        # Add header
+
+        # Header
         if dsl_enabled:
             content_blocks.append({
                 "type": "text",
@@ -172,49 +175,38 @@ If it doesn't fit perfectly, identify what needs to be refined.
                 "type": "text",
                 "text": "# Python Code Generator\nGenerate a Python `solve(I)` function.\n\n"
             })
-        
-        # Add training examples section
-        content_blocks.append({
-            "type": "text",
-            "text": "## Training Examples\n"
-        })
-        
-        # Format training examples (with images)
+
+        content_blocks.append({"type": "text", "text": "## Training Examples\n"})
         content_blocks.extend(self._format_training_examples(task['train'], include_images=True))
-        
-        # Format test examples (input only, no output)
         content_blocks.extend(self._format_test_examples(task['test'], include_images=True))
-        
-        # Add pattern description
-        content_blocks.append({
-            "type": "text",
-            "text": f"\n## Natural Language Pattern Description\n{validated_pattern}\n"
-        })
-        
-        #Removed dsl-enabled check to always show similar programs, TODO: see later if this helps
-        content_blocks.extend(self._format_similar_programs(similar_programs,  dsl_programs=dsl_programs))
-        
-        # Get template with dsl_enabled parameter
-        template = self._get_phase2c_dsl_section(dsl_enabled)
-        
-        # Add DSL primitives or Python instructions (dynamically generated)
-        content_blocks.append({
-            "type": "text",
-            "text": template
-        })
-        
-        # Add few-shot examples only if DSL is enabled
-        if few_shot:
+
+        # Pattern block — only include if we have something meaningful
+        if validated_pattern and pattern_source == '2b':
             content_blocks.append({
                 "type": "text",
-                "text": self._get_phase2c_fewshot_section()
+                "text": f"\n## Validated Pattern Description\n{validated_pattern}\n"
             })
-            
-        content_blocks.append({
-            "type": "text",
-            "text": "Generate the `solve(I)` function now.\n"
-        })
-        
+        elif validated_pattern and pattern_source == '2a':
+            content_blocks.append({
+                "type": "text",
+                "text": (
+                    f"\n## Hypothesis\n"
+                    f"Note: This hypothesis has not been validated against test inputs — "
+                    f"use it as a guide but verify against the examples above.\n\n"
+                    f"{validated_pattern}\n"
+                )
+            })
+        # pattern_source == 'none': omit the block entirely, no misleading context
+
+        content_blocks.extend(self._format_similar_programs(similar_programs, dsl_programs=dsl_programs))
+
+        template = self._get_phase2c_dsl_section(dsl_enabled)
+        content_blocks.append({"type": "text", "text": template})
+
+        if few_shot:
+            content_blocks.append({"type": "text", "text": self._get_phase2c_fewshot_section()})
+
+        content_blocks.append({"type": "text", "text": "Generate the `solve(I)` function now.\n"})
         return content_blocks
 
     def build_2d_prompt(self,
@@ -283,7 +275,7 @@ If it doesn't fit perfectly, identify what needs to be refined.
         # Add first incorrect program and diff grid
         content_blocks.append({
             "type": "text",
-            "text": f"\n## First Incorrect Program (Train Score: {best_train_score:.2f})\n```python\n{best_program_code}\n```\n"
+            "text": f"\n## Current Incorrect Program (Train Score: {best_train_score:.2f})\n```python\n{best_program_code}\n```\n"
         })
                 
         content_blocks.append({
@@ -295,20 +287,20 @@ If it doesn't fit perfectly, identify what needs to be refined.
             "text": f"\nASCII representation:\n{self._format_grid(diff_grid, separator='|')}\n"
         })
         
-        # Add second incorrect program and diff grid
-        content_blocks.append({
-            "type": "text",
-            "text": f"\n## Second Incorrect Program (Train Score: {second_best_train_score:.2f})\n```python\n{second_best_program_code}\n```\n"
-        })
+        # # Add second incorrect program and diff grid
+        # content_blocks.append({
+        #     "type": "text",
+        #     "text": f"\n## Second Incorrect Program (Train Score: {second_best_train_score:.2f})\n```python\n{second_best_program_code}\n```\n"
+        # })
         
-        content_blocks.append({
-            "type": "text",
-            "text": "### Difference Grid from Actual Output\n"
-        })
-        content_blocks.append({
-            "type": "text",
-            "text": f"\nASCII representation:\n{self._format_grid(diff_grid2, separator='|')}\n"
-        })
+        # content_blocks.append({
+        #     "type": "text",
+        #     "text": "### Difference Grid from Actual Output\n"
+        # })
+        # content_blocks.append({
+        #     "type": "text",
+        #     "text": f"\nASCII representation:\n{self._format_grid(diff_grid2, separator='|')}\n"
+        # })
         # Add DSL primitives or Python instructions (dynamically generated)
         if dsl_enabled:
             content_blocks.append({
